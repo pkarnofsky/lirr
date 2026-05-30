@@ -1,108 +1,129 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <title>LIRR GTFS Uploader (recursive, calendar_dates fallback)</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px; line-height:1.4; background:#ffffff; color:#000000; }
-    h1 { font-size:18px; margin:0 0 8px 0; }
-    p { margin:8px 0; color:#222; }
-    .muted { color:#444; font-size:13px; }
-    .status { margin:10px 0; padding:10px; border-radius:8px; background:#f6f8fa; color:#111; border:1px solid #ddd; }
-    .err { color:#b00020; }
-    .ok { color:green; }
-    .controls { display:flex; gap:8px; margin:10px 0 16px 0; flex-wrap:wrap; }
-    .btn { display:inline-block; padding:10px 14px; background:#007bff; color:#fff; border-radius:8px; text-decoration:none; cursor:pointer; border:none; font-weight:600; }
-    .btn.secondary { background:#6c757d; }
-    pre { background:#0b1220; color:#e6eef8; padding:10px; border-radius:8px; overflow:auto; max-height:260px; white-space:pre-wrap; word-break:break-word; }
-    label.file-label { display:inline-block; padding:10px 14px; background:#e9ecef; border-radius:8px; cursor:pointer; color:#000; }
-    ul.files { margin:8px 0 0 18px; color:#222; }
-    .hint { font-size:13px; color:#666; margin-top:6px; }
-    @media (prefers-color-scheme: dark) {
-      body { background:#000000; color:#ffffff; }
-      .status { background:#111214; color:#ddd; border:1px solid #222; }
-      label.file-label { background:#222; color:#fff; }
-      .btn.secondary { background:#444; }
-      pre { background:#0b1220; color:#e6eef8; }
-      .muted { color:#bbb; }
-    }
-  </style>
+<meta charset="utf-8">
+<title>LIRR GTFS Uploader</title>
+<style>
+  body {
+    font-family: sans-serif;
+    padding: 20px;
+  }
+  #status {
+    margin-top: 20px;
+    font-weight: bold;
+  }
+</style>
 </head>
 <body>
-  <h1>LIRR GTFS Uploader</h1>
-  <p class="muted">Choose a GTFS ZIP. The uploader searches inside the ZIP (including subfolders) for required files and will accept feeds that only include <code>calendar_dates.txt</code>.</p>
 
-  <div class="controls">
-    <label class="file-label" id="chooseLabel">Choose file
-      <input id="fileInput" type="file" accept=".zip" style="display:none" />
-    </label>
-    <button id="uploadBtn" class="btn">Upload &amp; Parse</button>
-    <button id="copyBtn" class="btn secondary" style="display:none">Copy JSON</button>
-    <a id="downloadBtn" class="btn secondary" style="display:none" download="gtfs_compact.json">Download JSON</a>
-  </div>
+<h2>LIRR GTFS Upload</h2>
+<p>Select <strong>gtfslirr.zip</strong> to load the full LIRR schedule into your Pebble app.</p>
 
-  <div id="status" class="status">No file selected.</div>
+<input type="file" id="file" accept=".zip">
+<div id="status"></div>
 
-  <div class="hint">Android tip: if the Downloads view refreshes when you pick a file, try opening the ZIP from the Files/Downloads app and using <strong>Share → Browser</strong>, or use Firefox. Desktop upload is most reliable.</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+<script>
+const statusEl = document.getElementById("status");
 
-  <h2 class="muted">Files found in ZIP</h2>
-  <div id="foundFiles" class="muted">None</div>
+function setStatus(msg) {
+  statusEl.textContent = msg;
+  console.log(msg);
+}
 
-  <div id="resultArea" style="display:none; margin-top:12px;">
-    <p class="ok">Parsing complete. The compact GTFS index is below. The page will attempt to return it to the Pebble companion automatically.</p>
-    <pre id="jsonOut"></pre>
-  </div>
+document.getElementById("file").addEventListener("change", async function(evt) {
+  const file = evt.target.files[0];
+  if (!file) {
+    setStatus("No file selected.");
+    return;
+  }
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  setStatus("Reading ZIP…");
 
-  <script>
-  (function(){
-    const fileInput = document.getElementById('fileInput');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const copyBtn = document.getElementById('copyBtn');
-    const downloadBtn = document.getElementById('downloadBtn');
-    const status = document.getElementById('status');
-    const foundFiles = document.getElementById('foundFiles');
-    const resultArea = document.getElementById('resultArea');
-    const jsonOut = document.getElementById('jsonOut');
-    const chooseLabel = document.getElementById('chooseLabel');
+  try {
+    const zip = await JSZip.loadAsync(file);
 
-    const REQUIRED = ['stops.txt','trips.txt','stop_times.txt'];
-    // calendar.txt preferred, but we will accept calendar_dates.txt only
-    const OPTIONAL = ['calendar.txt','calendar_dates.txt'];
+    // Required GTFS files
+    const stopsTxt      = await zip.file("stops.txt").async("string");
+    const stopTimesTxt  = await zip.file("stop_times.txt").async("string");
+    const tripsTxt      = await zip.file("trips.txt").async("string");
 
-    let selectedFile = null;
-    let lastPayload = null;
-
-    function setStatus(msg, cls) {
-      status.textContent = msg;
-      status.className = 'status' + (cls ? ' ' + cls : '');
-    }
-
-    function listFound(filesMap) {
-      if (!filesMap || Object.keys(filesMap).length === 0) {
-        foundFiles.textContent = 'None';
-        return;
-      }
-      const lines = [];
-      Object.keys(filesMap).forEach(k => {
-        lines.push(k + '  —  ' + filesMap[k]);
-      });
-      foundFiles.innerHTML = '<ul class="files"><li>' + lines.join('</li><li>') + '</li></ul>';
-    }
+    setStatus("Parsing CSV…");
 
     function parseCSV(text) {
-      return Papa.parse(text.trim(), { header: true, skipEmptyLines: true }).data;
+      const lines = text.trim().split("\n");
+      const headers = lines[0].split(",");
+      return lines.slice(1).map(line => {
+        const cols = line.split(",");
+        const obj = {};
+        headers.forEach((h, i) => obj[h] = cols[i]);
+        return obj;
+      });
     }
 
-    // Safe recursive search: use Object.keys to enumerate zip.files
-    function findFilePathInZip(zip, basename) {
-      const lower = basename.toLowerCase();
-      const keys = Object.keys(zip.files || {});
-      for (let i = 0; i < keys.length; i++) {
+    const stops = parseCSV(stopsTxt);
+    const stopTimes = parseCSV(stopTimesTxt);
+    const trips = parseCSV(tripsTxt);
+
+    setStatus("Building compact JSON…");
+
+    // stops.json format:
+    // { "Penn Station": ["stop1","stop2"], ... }
+    const stopsOut = {};
+    stops.forEach(s => {
+      const name = s.stop_name;
+      const id = s.stop_id;
+      if (!stopsOut[name]) stopsOut[name] = [];
+      stopsOut[name].push(id);
+    });
+
+    // stop_times.json format:
+    // [ {trip, stop, dep, seq, display}, ... ]
+    function timeToEpoch(hms) {
+      const [h, m, s] = hms.split(":").map(Number);
+      const now = new Date();
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s);
+      return Math.floor(d.getTime() / 1000);
+    }
+
+    const stopTimesOut = stopTimes.map(st => ({
+      trip: st.trip_id,
+      stop: st.stop_id,
+      seq: parseInt(st.stop_sequence, 10),
+      dep: timeToEpoch(st.departure_time),
+      display: st.departure_time
+    }));
+
+    // trips.json format:
+    // { trip_id: {route, dir}, ... }
+    const tripsOut = {};
+    trips.forEach(t => {
+      tripsOut[t.trip_id] = {
+        route: t.route_id,
+        dir: t.direction_id
+      };
+    });
+
+    const payload = {
+      stops: stopsOut,
+      stop_times: stopTimesOut,
+      trips: tripsOut
+    };
+
+    setStatus("Sending data back to Pebble…");
+
+    const encoded = encodeURIComponent(JSON.stringify(payload));
+    document.location = "pebblejs://close#" + encoded;
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Error processing GTFS ZIP: " + err);
+  }
+});
+</script>
+
+</body>
+</html>      for (let i = 0; i < keys.length; i++) {
         const name = keys[i];
         const n = name.toLowerCase();
         if (n === lower || n.endsWith('/' + lower)) return name;
