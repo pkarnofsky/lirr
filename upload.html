@@ -7,6 +7,8 @@
   body {
     font-family: sans-serif;
     padding: 20px;
+    background: #ffffff;
+    color: #000000;
   }
   #status {
     margin-top: 20px;
@@ -43,10 +45,9 @@ document.getElementById("file").addEventListener("change", async function(evt) {
   try {
     const zip = await JSZip.loadAsync(file);
 
-    // Required GTFS files
-    const stopsTxt      = await zip.file("stops.txt").async("string");
-    const stopTimesTxt  = await zip.file("stop_times.txt").async("string");
-    const tripsTxt      = await zip.file("trips.txt").async("string");
+    const stopsTxt     = await zip.file("stops.txt").async("string");
+    const stopTimesTxt = await zip.file("stop_times.txt").async("string");
+    const tripsTxt     = await zip.file("trips.txt").async("string");
 
     setStatus("Parsing CSV…");
 
@@ -67,18 +68,12 @@ document.getElementById("file").addEventListener("change", async function(evt) {
 
     setStatus("Building compact JSON…");
 
-    // stops.json format:
-    // { "Penn Station": ["stop1","stop2"], ... }
     const stopsOut = {};
     stops.forEach(s => {
-      const name = s.stop_name;
-      const id = s.stop_id;
-      if (!stopsOut[name]) stopsOut[name] = [];
-      stopsOut[name].push(id);
+      if (!stopsOut[s.stop_name]) stopsOut[s.stop_name] = [];
+      stopsOut[s.stop_name].push(s.stop_id);
     });
 
-    // stop_times.json format:
-    // [ {trip, stop, dep, seq, display}, ... ]
     function timeToEpoch(hms) {
       const [h, m, s] = hms.split(":").map(Number);
       const now = new Date();
@@ -94,8 +89,6 @@ document.getElementById("file").addEventListener("change", async function(evt) {
       display: st.departure_time
     }));
 
-    // trips.json format:
-    // { trip_id: {route, dir}, ... }
     const tripsOut = {};
     trips.forEach(t => {
       tripsOut[t.trip_id] = {
@@ -122,218 +115,5 @@ document.getElementById("file").addEventListener("change", async function(evt) {
 });
 </script>
 
-</body>
-</html>      for (let i = 0; i < keys.length; i++) {
-        const name = keys[i];
-        const n = name.toLowerCase();
-        if (n === lower || n.endsWith('/' + lower)) return name;
-      }
-      return null;
-    }
-
-    // Build services from calendar.txt rows
-    function buildServiceCalendar(calendarRows, calendarDatesRows) {
-      const services = {};
-      (calendarRows || []).forEach(r => {
-        const sid = r.service_id;
-        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
-        services[sid].weekly = {
-          mon: r.monday === '1',
-          tue: r.tuesday === '1',
-          wed: r.wednesday === '1',
-          thu: r.thursday === '1',
-          fri: r.friday === '1',
-          sat: r.saturday === '1',
-          sun: r.sunday === '1'
-        };
-        services[sid].start = r.start_date;
-        services[sid].end = r.end_date;
-      });
-      (calendarDatesRows || []).forEach(r => {
-        const sid = r.service_id;
-        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
-        services[sid].exceptions[r.date] = r.exception_type;
-      });
-      return services;
-    }
-
-    // If calendar.txt missing but calendar_dates present, synthesize minimal services:
-    function synthesizeServicesFromCalendarDates(calendarDatesRows) {
-      const services = {};
-      (calendarDatesRows || []).forEach(r => {
-        const sid = r.service_id || ('synth_' + (r.date || Math.random().toString(36).slice(2,8)));
-        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
-        // treat calendar_dates as exceptions: 1 = added, 2 = removed
-        services[sid].exceptions[r.date] = r.exception_type;
-      });
-      return services;
-    }
-
-    function buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows) {
-      const stops = {};
-      (stopsRows || []).forEach(r => { if (r.stop_id && r.stop_name) stops[r.stop_id] = r.stop_name; });
-      const trips = {};
-      (tripsRows || []).forEach(r => { if (r.trip_id) trips[r.trip_id] = { route_id: r.route_id || '', service_id: r.service_id || '' }; });
-      const stop_times_by_stop = {};
-      (stopTimesRows || []).forEach(r => {
-        if (!r.stop_id || !r.trip_id) return;
-        stop_times_by_stop[r.stop_id] = stop_times_by_stop[r.stop_id] || [];
-        stop_times_by_stop[r.stop_id].push({
-          trip_id: r.trip_id,
-          arrival_time: r.arrival_time || r.arrival,
-          departure_time: r.departure_time || r.departure,
-          stop_sequence: parseInt(r.stop_sequence || r.stop_sequence, 10) || 0
-        });
-      });
-      Object.keys(stop_times_by_stop).forEach(sid => {
-        stop_times_by_stop[sid].sort((a,b) => {
-          if (!a.departure_time) return 1;
-          if (!b.departure_time) return -1;
-          return a.departure_time.localeCompare(b.departure_time);
-        });
-      });
-      let services = buildServiceCalendar(calendarRows, calendarDatesRows);
-      if ((!calendarRows || calendarRows.length === 0) && calendarDatesRows && calendarDatesRows.length > 0) {
-        // synthesize if calendar.txt missing
-        services = synthesizeServicesFromCalendarDates(calendarDatesRows);
-      }
-      return { stops, trips, stop_times_by_stop, services };
-    }
-
-    fileInput.addEventListener('change', function(ev){
-      selectedFile = ev.target.files && ev.target.files[0];
-      if (!selectedFile) {
-        setStatus('No file selected.');
-        foundFiles.textContent = 'None';
-        return;
-      }
-      setStatus('Selected: ' + selectedFile.name);
-      resultArea.style.display = 'none';
-      jsonOut.textContent = '';
-      copyBtn.style.display = 'none';
-      downloadBtn.style.display = 'none';
-      lastPayload = null;
-      JSZip.loadAsync(selectedFile).then(zip => {
-        const map = {};
-        const keys = Object.keys(zip.files || {});
-        for (let i = 0; i < keys.length; i++) {
-          const name = keys[i];
-          const base = name.split('/').pop();
-          if (!map[base]) map[base] = name;
-        }
-        listFound(map);
-        setStatus('File ready. Tap "Upload & Parse" to begin.');
-      }).catch(err => {
-        console.error(err);
-        setStatus('Error reading zip: ' + (err && err.message ? err.message : err), 'err');
-        foundFiles.textContent = 'None';
-      });
-    });
-
-    uploadBtn.addEventListener('click', function(){
-      if (!selectedFile) {
-        setStatus('Please choose a ZIP file first.', 'err');
-        return;
-      }
-      setStatus('Loading ZIP and searching for GTFS files...');
-      resultArea.style.display = 'none';
-      jsonOut.textContent = '';
-      copyBtn.style.display = 'none';
-      downloadBtn.style.display = 'none';
-      JSZip.loadAsync(selectedFile).then(async zip => {
-        const found = {};
-        REQUIRED.forEach(r => {
-          const p = findFilePathInZip(zip, r);
-          if (p) found[r] = p;
-        });
-        OPTIONAL.forEach(r => {
-          const p = findFilePathInZip(zip, r);
-          if (p) found[r] = p;
-        });
-        listFound(found);
-        // calendar.txt optional if calendar_dates exists
-        const missingRequired = REQUIRED.filter(r => !found[r]);
-        if (missingRequired.length > 0) {
-          setStatus('Missing Required GTFS files in the zip (' + missingRequired.join(', ') + ')', 'err');
-          return;
-        }
-        // If calendar.txt missing and calendar_dates missing -> error
-        if (!found['calendar.txt'] && !found['calendar_dates.txt']) {
-          setStatus('Missing calendar.txt and calendar_dates.txt. One of these is required.', 'err');
-          return;
-        }
-
-        setStatus('Found required files. Reading CSVs (this may take a few seconds)...');
-        try {
-          const stopsTxt = await zip.file(found['stops.txt']).async('string');
-          const tripsTxt = await zip.file(found['trips.txt']).async('string');
-          const stopTimesTxt = await zip.file(found['stop_times.txt']).async('string');
-          const calendarTxt = found['calendar.txt'] ? await zip.file(found['calendar.txt']).async('string') : '';
-          const calendarDatesTxt = found['calendar_dates.txt'] ? await zip.file(found['calendar_dates.txt']).async('string') : '';
-          setStatus('Parsing CSV files...');
-          const stopsRows = parseCSV(stopsTxt);
-          const tripsRows = parseCSV(tripsTxt);
-          const stopTimesRows = parseCSV(stopTimesTxt);
-          const calendarRows = calendarTxt ? parseCSV(calendarTxt) : [];
-          const calendarDatesRows = calendarDatesTxt ? parseCSV(calendarDatesTxt) : [];
-          setStatus('Building compact index...');
-          const compactIndex = buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows);
-          const payload = {
-            generated_at: Math.floor(Date.now()/1000),
-            source_file: selectedFile.name,
-            index: compactIndex
-          };
-          const json = JSON.stringify(payload);
-          lastPayload = json;
-          jsonOut.textContent = json;
-          resultArea.style.display = 'block';
-          copyBtn.style.display = 'inline-block';
-          const blob = new Blob([json], {type:'application/json'});
-          downloadBtn.href = URL.createObjectURL(blob);
-          downloadBtn.style.display = 'inline-block';
-          setStatus('Parsing complete. Attempting to return data to Pebble companion...', 'ok');
-
-          try {
-            const encoded = encodeURIComponent(json);
-            if (encoded.length > 200000) {
-              setStatus('Parsed JSON is large. Use Copy JSON or Download JSON to transfer to the companion manually.', 'err');
-              return;
-            }
-            window.location = 'pebblejs://close#' + encoded;
-          } catch (e) {
-            setStatus('Could not redirect to pebblejs://close. Use Copy JSON or Download JSON.', 'err');
-          }
-        } catch (err) {
-          console.error(err);
-          setStatus('Error reading or parsing GTFS files: ' + (err && err.message ? err.message : err), 'err');
-        }
-      }).catch(err => {
-        console.error(err);
-        setStatus('Error loading ZIP: ' + (err && err.message ? err.message : err), 'err');
-      });
-    });
-
-    copyBtn.addEventListener('click', function(){
-      if (!lastPayload) return;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(lastPayload).then(function(){ alert('JSON copied to clipboard.'); }).catch(function(){ fallbackCopy(lastPayload); });
-      } else {
-        fallbackCopy(lastPayload);
-      }
-    });
-
-    function fallbackCopy(text) {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); alert('JSON copied to clipboard.'); } catch(e){ alert('Copy failed. Please select and copy manually.'); }
-      document.body.removeChild(ta);
-    }
-
-    chooseLabel.addEventListener('click', function(){ fileInput.click(); });
-
-  })();
-  </script>
 </body>
 </html>
