@@ -2,279 +2,160 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>LIRR 5-Station GTFS → JSON</title>
+  <title>LIRR 5-Station GTFS → JSON (Android Safe)</title>
   <style>
     body { font-family: sans-serif; padding: 20px; max-width: 700px; }
     textarea { width: 100%; height: 200px; font-family: monospace; }
-    label { display: block; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <h1>LIRR 5-Station GTFS → JSON</h1>
+  <h1>LIRR 5-Station GTFS → JSON (Android Safe)</h1>
 
-  <p>
-    This tool takes an LIRR GTFS ZIP and produces a compact JSON containing:
-    two service days (today + tomorrow), only 5 stations (GCT, Penn, Forest Hills,
-    Jamaica, Farmingdale), and all origin/destination pairs.
-  </p>
+  <p>Use the filtered stop_times file from Page A.</p>
 
-  <label>
-    GTFS ZIP:
-    <input type="file" id="zipFile" accept=".zip">
-  </label>
+  <label>stops.txt: <input type="file" id="stops"></label><br>
+  <label>trips.txt: <input type="file" id="trips"></label><br>
+  <label>calendar.txt (optional): <input type="file" id="cal"></label><br>
+  <label>calendar_dates.txt (optional): <input type="file" id="caldates"></label><br>
+  <label>stop_times_filtered.json: <input type="file" id="filtered"></label><br>
 
   <label>
-    Gist raw URL for gtfs.json:
-    <input type="text" id="gistUrl" style="width:100%;"
-           placeholder="https://gist.githubusercontent.com/.../raw/gtfs.json">
+    Gist raw URL:
+    <input type="text" id="gistUrl" style="width:100%;">
   </label>
 
-  <button id="processBtn">Process GTFS</button>
+  <button id="processBtn">Generate JSON</button>
 
   <h2>Output JSON</h2>
   <textarea id="output"></textarea>
 
-  <h2>Upload status</h2>
-  <pre id="status"></pre>
-
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script>
-    // Fixed 5 stations by stop_id
-    const TARGET_STOP_IDS = new Set(["349", "237", "55", "102", "59"]);
-    const STATION_ORDER = ["349", "237", "55", "102", "59"]; // GCT, Penn, FH, JAM, FMD
+    const TARGET = new Set(["349","237","55","102","59"]);
+    const ORDER = ["349","237","55","102","59"];
 
-    document.getElementById('processBtn').addEventListener('click', () => {
-      const fileInput = document.getElementById('zipFile');
-      const gistUrl = document.getElementById('gistUrl').value.trim();
-      const statusEl = document.getElementById('status');
-      const outputEl = document.getElementById('output');
+    document.getElementById("processBtn").onclick = async () => {
+      const stops = await readText("stops");
+      const trips = await readText("trips");
+      const cal = await readText("cal", true);
+      const caldates = await readText("caldates", true);
+      const filtered = await readJSON("filtered");
 
-      statusEl.textContent = '';
-      outputEl.value = '';
+      const stopsArr = parseCSV(stops);
+      const tripsArr = parseCSV(trips);
+      const calArr = cal ? parseCSV(cal) : null;
+      const caldatesArr = caldates ? parseCSV(caldates) : null;
 
-      if (!fileInput.files[0]) {
-        statusEl.textContent = 'Please select a GTFS ZIP file.';
-        return;
-      }
-      if (!gistUrl) {
-        statusEl.textContent = 'Please enter the Gist raw URL for gtfs.json.';
-        return;
-      }
+      const now = new Date();
+      const today = ymd(now);
+      const tomorrow = ymd(new Date(now.getTime()+86400000));
+      const serviceDates = new Set([today, tomorrow]);
 
-      const file = fileInput.files[0];
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        JSZip.loadAsync(e.target.result).then(zip => processZip(zip, gistUrl));
-      };
-      reader.readAsArrayBuffer(file);
-    });
+      const active = computeActive(serviceDates, calArr, caldatesArr);
+      const { filteredTrips, tripIdSet } = filterTrips(tripsArr, active);
 
-    function processZip(zip, gistUrl) {
-      const statusEl = document.getElementById('status');
-      const outputEl = document.getElementById('output');
-
-      statusEl.textContent = 'Reading GTFS files...';
-
-      Promise.all([
-        readTextFromZip(zip, 'stops.txt'),
-        readTextFromZip(zip, 'trips.txt'),
-        readTextFromZip(zip, 'stop_times.txt'),
-        readOptionalTextFromZip(zip, 'calendar.txt'),
-        readOptionalTextFromZip(zip, 'calendar_dates.txt')
-      ]).then(([stopsTxt, tripsTxt, stopTimesTxt, calendarTxt, calendarDatesTxt]) => {
-        const now = new Date();
-        const todayStr = formatDateYYYYMMDD(now);
-        const tomorrowStr = formatDateYYYYMMDD(new Date(now.getTime() + 24*60*60*1000));
-        const serviceDates = new Set([todayStr, tomorrowStr]);
-
-        const stops = parseCSV(stopsTxt);
-        const trips = parseCSV(tripsTxt);
-        const stopTimes = parseCSV(stopTimesTxt);
-        const calendar = calendarTxt ? parseCSV(calendarTxt) : null;
-        const calendarDates = calendarDatesTxt ? parseCSV(calendarDatesTxt) : null;
-
-        const activeServiceIds = computeActiveServiceIds(serviceDates, calendar, calendarDates);
-        const { filteredTrips, tripIdSet } = filterTripsByService(trips, activeServiceIds);
-        const filteredStopTimes = filterStopTimes(stopTimes, tripIdSet, TARGET_STOP_IDS);
-
-        const compact = buildCompactJson(stops, filteredTrips, filteredStopTimes, serviceDates);
-
-        const jsonStr = JSON.stringify(compact, null, 2);
-        outputEl.value = jsonStr;
-        statusEl.textContent = 'JSON generated. Uploading to Gist...';
-
-        uploadToGist(gistUrl, jsonStr)
-          .then(() => {
-            statusEl.textContent = 'Upload complete.';
-          })
-          .catch(err => {
-            statusEl.textContent = 'Upload failed: ' + err;
-          });
-      }).catch(err => {
-        statusEl.textContent = 'Error: ' + err;
-      });
-    }
-
-    function readTextFromZip(zip, name) {
-      const entry = Object.keys(zip.files).find(k => k.toLowerCase().endsWith('/' + name.toLowerCase()) || k.toLowerCase() === name.toLowerCase());
-      if (!entry) throw new Error('Missing ' + name);
-      return zip.files[entry].async('string');
-    }
-
-    function readOptionalTextFromZip(zip, name) {
-      const entry = Object.keys(zip.files).find(k => k.toLowerCase().endsWith('/' + name.toLowerCase()) || k.toLowerCase() === name.toLowerCase());
-      if (!entry) return Promise.resolve(null);
-      return zip.files[entry].async('string');
-    }
-
-    function parseCSV(text) {
-      const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim().length > 0);
-      const header = parseCSVLine(lines[0]);
-      const rows = [];
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i]);
-        if (cols.length === 0) continue;
-        const obj = {};
-        header.forEach((h, idx) => obj[h] = cols[idx] || '');
-        rows.push(obj);
-      }
-      return rows;
-    }
-
-    function parseCSVLine(line) {
-      const out = [];
-      let cur = '';
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (inQuotes) {
-          if (c === '"') {
-            if (line[i+1] === '"') { cur += '"'; i++; }
-            else inQuotes = false;
-          } else {
-            cur += c;
-          }
-        } else {
-          if (c === '"') inQuotes = true;
-          else if (c === ',') { out.push(cur); cur = ''; }
-          else cur += c;
-        }
-      }
-      out.push(cur);
-      return out;
-    }
-
-    function formatDateYYYYMMDD(d) {
-      const y = d.getFullYear();
-      const m = ('0' + (d.getMonth() + 1)).slice(-2);
-      const day = ('0' + d.getDate()).slice(-2);
-      return '' + y + m + day;
-    }
-
-    function computeActiveServiceIds(serviceDates, calendar, calendarDates) {
-      const active = new Set();
-
-      if (calendar) {
-        for (const row of calendar) {
-          const start = row.start_date;
-          const end = row.end_date;
-          for (const date of serviceDates) {
-            if (date >= start && date <= end) {
-              const dow = new Date(date.slice(0,4) + '-' + date.slice(4,6) + '-' + date.slice(6,8)).getDay();
-              const map = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-              if (row[map[dow]] === '1') {
-                active.add(row.service_id);
-              }
-            }
-          }
-        }
-      }
-
-      if (calendarDates) {
-        for (const row of calendarDates) {
-          if (!serviceDates.has(row.date)) continue;
-          if (row.exception_type === '1') {
-            active.add(row.service_id);
-          } else if (row.exception_type === '2') {
-            active.delete(row.service_id);
-          }
-        }
-      }
-
-      return active;
-    }
-
-    function filterTripsByService(trips, activeServiceIds) {
-      const filteredTrips = [];
-      const tripIdSet = new Set();
-      for (const t of trips) {
-        if (activeServiceIds.has(t.service_id)) {
-          filteredTrips.push(t);
-          tripIdSet.add(t.trip_id);
-        }
-      }
-      return { filteredTrips, tripIdSet };
-    }
-
-    function filterStopTimes(stopTimes, tripIdSet, targetStopIds) {
-      return stopTimes.filter(st => tripIdSet.has(st.trip_id) && targetStopIds.has(st.stop_id));
-    }
-
-    function buildCompactJson(stops, trips, stopTimes, serviceDates) {
       const stopIdToName = {};
-      for (const s of stops) {
-        if (TARGET_STOP_IDS.has(s.stop_id)) {
-          stopIdToName[s.stop_id] = s.stop_name;
-        }
-      }
+      stopsArr.forEach(s => {
+        if (TARGET.has(s.stop_id)) stopIdToName[s.stop_id] = s.stop_name;
+      });
 
       const stopsObj = {};
-      for (const id of STATION_ORDER) {
-        if (stopIdToName[id]) {
-          stopsObj[stopIdToName[id]] = [id];
-        }
-      }
-
-      const tripsObj = {};
-      for (const t of trips) {
-        tripsObj[t.trip_id] = {
-          route: t.route_id || '',
-          service_id: t.service_id
-        };
-      }
-
-      const stopTimesArr = stopTimes.map(st => {
-        const dep = st.departure_time || st.arrival_time;
-        const seconds = timeToSeconds(dep);
-        return {
-          trip: st.trip_id,
-          stop: st.stop_id,
-          seq: parseInt(st.stop_sequence, 10) || 0,
-          dep: seconds,
-          disp: dep
-        };
+      ORDER.forEach(id => {
+        if (stopIdToName[id]) stopsObj[stopIdToName[id]] = [id];
       });
 
-      return {
+      const tripsObj = {};
+      filteredTrips.forEach(t => {
+        tripsObj[t.trip_id] = { route: t.route_id, service_id: t.service_id };
+      });
+
+      const stopTimesArr = filtered
+        .filter(st => tripIdSet.has(st.trip))
+        .map(st => ({
+          trip: st.trip,
+          stop: st.stop,
+          seq: st.seq,
+          dep: toSec(st.dep),
+          disp: st.dep
+        }));
+
+      const out = {
         generated_at: new Date().toISOString(),
         service_dates: Array.from(serviceDates),
         stops: stopsObj,
         trips: tripsObj,
         stop_times: stopTimesArr
       };
+
+      document.getElementById("output").value = JSON.stringify(out, null, 2);
+    };
+
+    function readText(id, optional) {
+      const f = document.getElementById(id).files[0];
+      if (!f) return optional ? Promise.resolve(null) : Promise.reject("Missing "+id);
+      return f.text();
+    }
+    function readJSON(id) {
+      const f = document.getElementById(id).files[0];
+      if (!f) throw "Missing filtered stop_times";
+      return f.text().then(JSON.parse);
     }
 
-    function timeToSeconds(t) {
+    function parseCSV(text) {
+      const lines = text.trim().split("\n");
+      const header = lines[0].split(",");
+      return lines.slice(1).map(l => {
+        const cols = l.split(",");
+        const o = {};
+        header.forEach((h,i)=>o[h]=cols[i]);
+        return o;
+      });
+    }
+
+    function ymd(d) {
+      return d.getFullYear().toString() +
+        String(d.getMonth()+1).padStart(2,"0") +
+        String(d.getDate()).padStart(2,"0");
+    }
+
+    function computeActive(serviceDates, cal, caldates) {
+      const active = new Set();
+      if (cal) {
+        cal.forEach(row => {
+          serviceDates.forEach(date => {
+            if (date >= row.start_date && date <= row.end_date) {
+              const dow = new Date(date.slice(0,4)+"-"+date.slice(4,6)+"-"+date.slice(6,8)).getDay();
+              const map = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+              if (row[map[dow]] === "1") active.add(row.service_id);
+            }
+          });
+        });
+      }
+      if (caldates) {
+        caldates.forEach(row => {
+          if (!serviceDates.has(row.date)) return;
+          if (row.exception_type === "1") active.add(row.service_id);
+          if (row.exception_type === "2") active.delete(row.service_id);
+        });
+      }
+      return active;
+    }
+
+    function filterTrips(trips, active) {
+      const out = [];
+      const set = new Set();
+      trips.forEach(t => {
+        if (active.has(t.service_id)) {
+          out.push(t);
+          set.add(t.trip_id);
+        }
+      });
+      return { filteredTrips: out, tripIdSet: set };
+    }
+
+    function toSec(t) {
       if (!t) return 0;
-      const parts = t.split(':').map(x => parseInt(x, 10) || 0);
-      return parts[0]*3600 + parts[1]*3600/60 + parts[2];
-    }
-
-    function uploadToGist(url, content) {
-      // Assumes the Gist raw URL accepts PUT via GitHub auth in browser (often you’ll
-      // instead paste this JSON manually into the Gist editor).
-      // To keep this generic and safe, we just resolve immediately.
-      return Promise.resolve();
+      const [h,m,s] = t.split(":").map(Number);
+      return h*3600 + m*60 + s;
     }
   </script>
 </body>
