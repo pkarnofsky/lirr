@@ -3,20 +3,44 @@
 <head>
 <meta charset="utf-8">
 <title>LIRR Settings</title>
+
+<!-- Force light mode so Pebble WebView doesn't invert colors -->
+<meta name="color-scheme" content="light">
 <style>
-  body { font-family: sans-serif; padding: 20px; }
-  button { padding: 12px; font-size: 16px; }
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    forced-color-adjust: none;
+    font-family: sans-serif;
+    padding: 20px;
+  }
+  button {
+    padding: 14px 20px;
+    font-size: 18px;
+    background: #007aff;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    margin-top: 20px;
+    width: 100%;
+  }
 </style>
 </head>
+
 <body>
 
 <h2>LIRR Trip Planner Settings</h2>
-<p>Pebble cannot open file pickers inside the Settings WebView.</p>
-<p>Tap below to open the uploader in your phone’s browser.</p>
+<p>Pebble cannot open file pickers inside the Settings window.</p>
+<p>Tap below to open the GTFS uploader in your phone’s browser.</p>
 
-<button onclick="window.location='https://pkarnofsky.github.io/lirr/upload.html'">
-  Open GTFS Uploader
-</button>
+<button id="open">Open GTFS Uploader</button>
+
+<script>
+document.getElementById("open").addEventListener("click", function() {
+  // Close the Pebble WebView and signal the JS companion
+  document.location = "pebblejs://close#open-uploader";
+});
+</script>
 
 </body>
 </html>
