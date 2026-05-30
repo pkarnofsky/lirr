@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LIRR GTFS Uploader for Pebble</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding: 16px; color:#111; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    p { margin: 8px 0; }
+    .btn { display:inline-block; padding:10px 14px; background:#007bff; color:#fff; border-radius:6px; text-decoration:none; }
+    .muted { color:#666; font-size:13px; }
+    pre { background:#f6f8fa; padding:10px; border-radius:6px; overflow:auto; max-height:240px; }
+    .ok { color:green; }
+    .err { color:#b00020; }
+  </style>
+</head>
+<body>
+  <h1>LIRR GTFS Uploader (Pebble)</h1>
+  <p class="muted">Pick the <strong>gtfslirr.zip</strong> file you downloaded from MTA Developers. This page parses the GTFS and returns a compact JSON to the Pebble companion.</p>
+
+  <input id="fileInput" type="file" accept=".zip" />
+  <div id="status"></div>
+
+  <h2>Stations included</h2>
+  <p class="muted">This uploader will try to find stop IDs for these station names: <strong>Penn Station, Grand Central, Forest Hills, Jamaica, Farmingdale</strong>.</p>
+
+  <div id="resultArea" style="display:none;">
+    <p class="ok">Parsing complete. The compact GTFS index will be returned to the Pebble companion now.</p>
+    <p>If the Pebble companion does not receive the data automatically, you can copy the JSON below and paste it into your PebbleKit JS console or use another transfer method.</p>
+    <pre id="jsonOut"></pre>
+    <button id="copyBtn" class="btn">Copy JSON</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <script>
+  (function(){
+    const fileInput = document.getElementById('fileInput');
+    const status = document.getElementById('status');
+    const resultArea = document.getElementById('resultArea');
+    const jsonOut = document.getElementById('jsonOut');
+    const copyBtn = document.getElementById('copyBtn');
+
+    // Station names we care about (friendly names)
+    const STATIONS = ["Penn Station","Grand Central","Forest Hills","Jamaica","Farmingdale"];
+
+    function setStatus(msg, cls) {
+      status.innerHTML = '<p class="'+(cls||'')+'">'+msg+'</p>';
+    }
+
+    function parseCSV(text) {
+      return Papa.parse(text.trim(), { header: true, skipEmptyLines: true }).data;
+    }
+
+    // Convert GTFS time string "HH:MM:SS" possibly with HH >= 24 into epoch seconds (local timezone)
+    function gtfsTimeToEpochSeconds(gtfsTimeStr, referenceDate) {
+      // referenceDate is a Date object representing the local date to which the GTFS time belongs
+      // GTFS times are local times; if HH >= 24, it means next day(s)
+      const parts = gtfsTimeStr.split(':');
+      if (parts.length < 2) return null;
+      let hh = parseInt(parts[0],10);
+      const mm = parseInt(parts[1],10) || 0;
+      const ss = parts.length > 2 ? parseInt(parts[2],10) || 0 : 0;
+      // clone referenceDate at midnight local time
+      const base = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate(), 0, 0, 0, 0);
+      let dayOffset = 0;
+      if (hh >= 24) {
+        dayOffset = Math.floor(hh / 24);
+        hh = hh % 24;
+      }
+      base.setDate(base.getDate() + dayOffset);
+      base.setHours(hh, mm, ss, 0);
+      return Math.floor(base.getTime() / 1000);
+    }
+
+    // Determine if a service_id is active on a given date using calendar.txt and calendar_dates.txt
+    function buildServiceCalendar(calendarRows, calendarDatesRows) {
+      // calendarRows: array of rows with service_id, monday..sunday (0/1), start_date, end_date (YYYYMMDD)
+      // calendarDatesRows: array of rows with service_id, date (YYYYMMDD), exception_type (1 add, 2 remove)
+      const services = {};
+      calendarRows.forEach(r => {
+        const sid = r.service_id;
+        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
+        services[sid].weekly = {
+          mon: r.monday === '1',
+          tue: r.tuesday === '1',
+          wed: r.wednesday === '1',
+          thu: r.thursday === '1',
+          fri: r.friday === '1',
+          sat: r.saturday === '1',
+          sun: r.sunday === '1'
+        };
+        services[sid].start = r.start_date;
+        services[sid].end = r.end_date;
+      });
+      (calendarDatesRows || []).forEach(r => {
+        const sid = r.service_id;
+        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
+        services[sid].exceptions[r.date] = r.exception_type; // '1' or '2'
+      });
+      return services;
+    }
+
+    function serviceRunsOnDate(services, service_id, dateObj) {
+      // dateObj is local Date
+      const s = services[service_id];
+      if (!s) return false;
+      const y = dateObj.getFullYear();
+      const m = (dateObj.getMonth()+1).toString().padStart(2,'0');
+      const d = dateObj.getDate().toString().padStart(2,'0');
+      const ymd = '' + y + m + d;
+      // exceptions override
+      if (s.exceptions && s.exceptions[ymd]) {
+        return s.exceptions[ymd] === '1';
+      }
+      // check range
+      if (s.start && s.end) {
+        if (ymd < s.start || ymd > s.end) return false;
+      }
+      // check weekday
+      const wd = dateObj.getDay(); // 0 Sun .. 6 Sat
+      const map = [s.weekly ? s.weekly.sun : false, s.weekly ? s.weekly.mon : false, s.weekly ? s.weekly.tue : false, s.weekly ? s.weekly.wed : false, s.weekly ? s.weekly.thu : false, s.weekly ? s.weekly.fri : false, s.weekly ? s.weekly.sat : false];
+      return !!map[wd];
+    }
+
+    // Build compact index: stops map, trips map, stop_times grouped by stop_id
+    function buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows) {
+      const stops = {}; // stop_id -> stop_name
+      stopsRows.forEach(r => {
+        if (r.stop_id && r.stop_name) stops[r.stop_id] = r.stop_name;
+      });
+      const trips = {}; // trip_id -> { route_id, service_id }
+      tripsRows.forEach(r => {
+        if (r.trip_id) trips[r.trip_id] = { route_id: r.route_id || '', service_id: r.service_id || '' };
+      });
+      const stop_times_by_stop = {}; // stop_id -> [ { trip_id, arrival_time, departure_time, stop_sequence } ]
+      stopTimesRows.forEach(r => {
+        if (!r.stop_id || !r.trip_id) return;
+        stop_times_by_stop[r.stop_id] = stop_times_by_stop[r.stop_id] || [];
+        stop_times_by_stop[r.stop_id].push({
+          trip_id: r.trip_id,
+          arrival_time: r.arrival_time || r.arrival,
+          departure_time: r.departure_time || r.departure,
+          stop_sequence: parseInt(r.stop_sequence || r.stop_sequence, 10) || 0
+        });
+      });
+      // sort each stop's times by departure_time (string sort is fine for HH:MM:SS)
+      Object.keys(stop_times_by_stop).forEach(sid => {
+        stop_times_by_stop[sid].sort((a,b) => {
+          if (!a.departure_time) return 1;
+          if (!b.departure_time) return -1;
+          return a.departure_time.localeCompare(b.departure_time);
+        });
+      });
+      const services = buildServiceCalendar(calendarRows, calendarDatesRows);
+      return { stops, trips, stop_times_by_stop, services };
+    }
+
+    // Find stop_id for a friendly station name by searching stop_name contains token (case-insensitive)
+    function findStopIdsForStation(compactIndex, stationFriendly) {
+      const matches = [];
+      const needle = stationFriendly.toLowerCase();
+      Object.keys(compactIndex.stops).forEach(sid => {
+        const name = compactIndex.stops[sid];
+        if (!name) return;
+        if (name.toLowerCase().indexOf(needle) !== -1) matches.push({ stop_id: sid, stop_name: name });
+      });
+      return matches;
+    }
+
+    // Compute next N direct trains from originStopId to destStopId using compactIndex
+    function computeNextDirectTrains(compactIndex, originStopId, destStopId, nowEpochSec, n) {
+      const results = [];
+      const originTimes = compactIndex.stop_times_by_stop[originStopId] || [];
+      // For each origin stop_time, check if same trip has dest with higher stop_sequence
+      // Build a quick map trip_id -> stop_time at dest (if exists)
+      const destTimes = compactIndex.stop_times_by_stop[destStopId] || [];
+      const destTripMap = {};
+      destTimes.forEach(dt => destTripMap[dt.trip_id] = dt);
+      const nowDate = new Date(nowEpochSec * 1000);
+      for (let i=0;i<originTimes.length;i++) {
+        const ot = originTimes[i];
+        const trip = compactIndex.trips[ot.trip_id];
+        if (!trip) continue;
+        const destEntry = destTripMap[ot.trip_id];
+        if (!destEntry) continue;
+        // ensure stop_sequence ordering: origin sequence < dest sequence
+        if (ot.stop_sequence >= destEntry.stop_sequence) continue;
+        // ensure service runs today
+        if (!serviceRunsOnDate(compactIndex.services, trip.service_id, nowDate)) continue;
+        // convert departure_time to epoch
+        const depEpoch = gtfsTimeToEpochSeconds(ot.departure_time, nowDate);
+        if (depEpoch === null) continue;
+        // if departure is before now, skip (we want upcoming)
+        if (depEpoch < nowEpochSec - 30) continue; // allow 30s grace
+        results.push({
+          trip_id: ot.trip_id,
+          departure_epoch: depEpoch,
+          departure_time_str: ot.departure_time,
+          origin_stop_sequence: ot.stop_sequence,
+          dest_stop_sequence: destEntry.stop_sequence,
+          via: null
+        });
+      }
+      // sort by departure_epoch
+      results.sort((a,b) => a.departure_epoch - b.departure_epoch);
+      return results.slice(0,n);
+    }
+
+    // Build display-friendly time like "8:05 AM" from epoch seconds (local)
+    function formatEpochToAmPm(epochSec) {
+      const d = new Date(epochSec * 1000);
+      let h = d.getHours();
+      const m = d.getMinutes();
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12;
+      if (h === 0) h = 12;
+      return h + ':' + String(m).padStart(2,'0') + ' ' + ampm;
+    }
+
+    // Main compute function: given compactIndex and friendly origin/dest names, return up to 5 trains
+    function computeNextTrainsForFriendly(compactIndex, originFriendly, destFriendly, n) {
+      const nowEpoch = Math.floor(Date.now() / 1000);
+      const nowDate = new Date();
+      // find candidate stop_ids for origin and dest (prefer exact contains)
+      const originMatches = findStopIdsForStation(compactIndex, originFriendly);
+      const destMatches = findStopIdsForStation(compactIndex, destFriendly);
+      if (originMatches.length === 0 || destMatches.length === 0) {
+        return { error: 'Station not found in GTFS. Make sure the GTFS contains the stop names.' };
+      }
+      // For simplicity, pick the first match for each (most likely the main station)
+      const originStopId = originMatches[0].stop_id;
+      const destStopId = destMatches[0].stop_id;
+      // direct trains
+      const direct = computeNextDirectTrains(compactIndex, originStopId, destStopId, nowEpoch, n);
+      const out = [];
+      for (let i=0;i<direct.length;i++) {
+        const t = direct[i];
+        const minutes = Math.max(0, Math.round((t.departure_epoch - nowEpoch) / 60));
+        out.push({
+          departure_epoch: t.departure_epoch,
+          display_time: formatEpochToAmPm(t.departure_epoch),
+          minutes: minutes,
+          via: 'direct',
+          trip_id: t.trip_id
+        });
+      }
+      // If fewer than n, we could attempt one-transfer logic. For now, return what we have.
+      return { origin_stop_id: originStopId, dest_stop_id: destStopId, trains: out };
+    }
+
+    // When parsing finishes, build compact JSON and return to Pebble companion
+    function finishAndReturn(compactIndex) {
+      // Build a compact payload that the PebbleKit JS can use:
+      // { meta: { stations: [...] }, index: compactIndex }
+      // Keep it reasonably small by not including huge arrays; we include stop_times_by_stop as-is (could be large).
+      const payload = {
+        generated_at: Math.floor(Date.now()/1000),
+        stations: STATIONS,
+        index: compactIndex
+      };
+      const json = JSON.stringify(payload);
+      jsonOut.textContent = json;
+      resultArea.style.display = 'block';
+      // Try to return to Pebble companion using the pebblejs close URL
+      try {
+        // Encode and redirect
+        const encoded = encodeURIComponent(json);
+        // Use pebblejs close pattern
+        window.location = 'pebblejs://close#' + encoded;
+        setStatus('Attempting to return data to Pebble companion...', 'ok');
+      } catch (e) {
+        setStatus('Could not redirect to pebblejs://close. Use Copy JSON below.', 'err');
+      }
+    }
+
+    fileInput.addEventListener('change', function(ev) {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      setStatus('Reading zip file: ' + f.name);
+      resultArea.style.display = 'none';
+      jsonOut.textContent = '';
+      JSZip.loadAsync(f).then(function(zip) {
+        setStatus('Zip loaded. Reading GTFS files...');
+        // Required files
+        const required = ['stops.txt','trips.txt','stop_times.txt','calendar.txt'];
+        // calendar_dates.txt is optional
+        const promises = [];
+        promises.push(zip.file('stops.txt') ? zip.file('stops.txt').async('string') : Promise.resolve(''));
+        promises.push(zip.file('trips.txt') ? zip.file('trips.txt').async('string') : Promise.resolve(''));
+        promises.push(zip.file('stop_times.txt') ? zip.file('stop_times.txt').async('string') : Promise.resolve(''));
+        promises.push(zip.file('calendar.txt') ? zip.file('calendar.txt').async('string') : Promise.resolve(''));
+        promises.push(zip.file('calendar_dates.txt') ? zip.file('calendar_dates.txt').async('string') : Promise.resolve(''));
+        return Promise.all(promises);
+      }).then(function([stopsTxt, tripsTxt, stopTimesTxt, calendarTxt, calendarDatesTxt]) {
+        if (!stopsTxt || !tripsTxt || !stopTimesTxt || !calendarTxt) {
+          setStatus('Missing required GTFS files in the zip (stops.txt, trips.txt, stop_times.txt, calendar.txt).', 'err');
+          return;
+        }
+        setStatus('Parsing CSV files...');
+        const stopsRows = parseCSV(stopsTxt);
+        const tripsRows = parseCSV(tripsTxt);
+        const stopTimesRows = parseCSV(stopTimesTxt);
+        const calendarRows = parseCSV(calendarTxt);
+        const calendarDatesRows = calendarDatesTxt ? parseCSV(calendarDatesTxt) : [];
+        setStatus('Building compact index...');
+        const compactIndex = buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows);
+        setStatus('Index built. Attempting to return to Pebble companion...');
+        finishAndReturn(compactIndex);
+      }).catch(function(err) {
+        console.error(err);
+        setStatus('Error reading or parsing zip: ' + (err && err.message ? err.message : err), 'err');
+      });
+    });
+
+    copyBtn.addEventListener('click', function(){
+      const text = jsonOut.textContent;
+      if (!text) return;
+      navigator.clipboard && navigator.clipboard.writeText(text).then(function(){
+        alert('JSON copied to clipboard.');
+      }).catch(function(){
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); alert('JSON copied to clipboard.'); } catch(e){ alert('Copy failed. Please select and copy manually.'); }
+        document.body.removeChild(ta);
+      });
+    });
+
+    // Small helper: if the page is opened by Pebble companion with a query param ?test=1, show a quick demo
+    if (location.search.indexOf('test=1') !== -1) {
+      setStatus('Test mode: no file required. This demo does not include real GTFS data.', 'ok');
+    }
+  })();
+  </script>
+</body>
+</html>
