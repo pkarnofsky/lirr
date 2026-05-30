@@ -11,7 +11,7 @@
 <body>
   <h1>Filter stop_times.txt → stop_times_filtered.json</h1>
 
-  <p>This page extracts only the 5 stations you care about, producing a tiny file Android can handle.</p>
+  <p>This page extracts only the 5 stations you care about, including child stop_ids.</p>
 
   <label>
     stop_times.txt:
@@ -24,7 +24,12 @@
   <textarea id="output"></textarea>
 
   <script>
-    const TARGET = new Set(["349","237","55","102","59"]);
+    // Parent stop_ids for your 5 stations
+    const TARGET_PREFIXES = ["349","237","55","102","59"];
+
+    function matchesTarget(stopId) {
+      return TARGET_PREFIXES.some(prefix => stopId.startsWith(prefix));
+    }
 
     document.getElementById("processBtn").onclick = async () => {
       const file = document.getElementById("fileInput").files[0];
@@ -56,7 +61,8 @@
           const obj = {};
           header.forEach((h,i)=>obj[h]=cols[i]);
 
-          if (TARGET.has(obj.stop_id)) {
+          // MATCH CHILD STOP IDS HERE
+          if (matchesTarget(obj.stop_id)) {
             results.push({
               trip: obj.trip_id,
               stop: obj.stop_id,
