@@ -2,11 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>LIRR GTFS Uploader (recursive) for Pebble</title>
+  <title>LIRR GTFS Uploader (recursive, calendar_dates fallback)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
-    /* High-contrast default (light) */
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px; line-height:1.4; background:#ffffff; color:#000000; }
     h1 { font-size:18px; margin:0 0 8px 0; }
     p { margin:8px 0; color:#222; }
@@ -19,9 +18,8 @@
     .btn.secondary { background:#6c757d; }
     pre { background:#0b1220; color:#e6eef8; padding:10px; border-radius:8px; overflow:auto; max-height:260px; white-space:pre-wrap; word-break:break-word; }
     label.file-label { display:inline-block; padding:10px 14px; background:#e9ecef; border-radius:8px; cursor:pointer; color:#000; }
-    small.note { display:block; margin-top:6px; color:#666; }
     ul.files { margin:8px 0 0 18px; color:#222; }
-    /* Dark mode adjustments */
+    .hint { font-size:13px; color:#666; margin-top:6px; }
     @media (prefers-color-scheme: dark) {
       body { background:#000000; color:#ffffff; }
       .status { background:#111214; color:#ddd; border:1px solid #222; }
@@ -30,19 +28,14 @@
       pre { background:#0b1220; color:#e6eef8; }
       .muted { color:#bbb; }
     }
-    /* Accessibility: larger tap targets on small screens */
-    @media (max-width:420px) {
-      .btn, .file-label { padding:12px 16px; font-size:15px; }
-    }
   </style>
 </head>
 <body>
-  <h1>LIRR GTFS Uploader (recursive)</h1>
-  <p class="muted">Pick a GTFS ZIP. This uploader searches inside the ZIP (including subfolders) for required GTFS files, parses them, and returns a compact JSON to the Pebble companion.</p>
+  <h1>LIRR GTFS Uploader</h1>
+  <p class="muted">Choose a GTFS ZIP. The uploader searches inside the ZIP (including subfolders) for required files and will accept feeds that only include <code>calendar_dates.txt</code>.</p>
 
   <div class="controls">
-    <label class="file-label" id="chooseLabel">
-      Choose file
+    <label class="file-label" id="chooseLabel">Choose file
       <input id="fileInput" type="file" accept=".zip" style="display:none" />
     </label>
     <button id="uploadBtn" class="btn">Upload &amp; Parse</button>
@@ -51,6 +44,8 @@
   </div>
 
   <div id="status" class="status">No file selected.</div>
+
+  <div class="hint">Android tip: if the Downloads view refreshes when you pick a file, try opening the ZIP from the Files/Downloads app and using <strong>Share → Browser</strong>, or use Firefox. Desktop upload is most reliable.</div>
 
   <h2 class="muted">Files found in ZIP</h2>
   <div id="foundFiles" class="muted">None</div>
@@ -75,8 +70,9 @@
     const jsonOut = document.getElementById('jsonOut');
     const chooseLabel = document.getElementById('chooseLabel');
 
-    const REQUIRED = ['stops.txt','trips.txt','stop_times.txt','calendar.txt'];
-    const OPTIONAL = ['calendar_dates.txt'];
+    const REQUIRED = ['stops.txt','trips.txt','stop_times.txt'];
+    // calendar.txt preferred, but we will accept calendar_dates.txt only
+    const OPTIONAL = ['calendar.txt','calendar_dates.txt'];
 
     let selectedFile = null;
     let lastPayload = null;
@@ -114,6 +110,7 @@
       return null;
     }
 
+    // Build services from calendar.txt rows
     function buildServiceCalendar(calendarRows, calendarDatesRows) {
       const services = {};
       (calendarRows || []).forEach(r => {
@@ -134,6 +131,18 @@
       (calendarDatesRows || []).forEach(r => {
         const sid = r.service_id;
         services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
+        services[sid].exceptions[r.date] = r.exception_type;
+      });
+      return services;
+    }
+
+    // If calendar.txt missing but calendar_dates present, synthesize minimal services:
+    function synthesizeServicesFromCalendarDates(calendarDatesRows) {
+      const services = {};
+      (calendarDatesRows || []).forEach(r => {
+        const sid = r.service_id || ('synth_' + (r.date || Math.random().toString(36).slice(2,8)));
+        services[sid] = services[sid] || { weekly: null, start: null, end: null, exceptions: {} };
+        // treat calendar_dates as exceptions: 1 = added, 2 = removed
         services[sid].exceptions[r.date] = r.exception_type;
       });
       return services;
@@ -162,25 +171,12 @@
           return a.departure_time.localeCompare(b.departure_time);
         });
       });
-      const services = buildServiceCalendar(calendarRows, calendarDatesRows);
-      return { stops, trips, stop_times_by_stop, services };
-    }
-
-    function gtfsTimeToEpochSeconds(gtfsTimeStr, referenceDate) {
-      const parts = gtfsTimeStr.split(':');
-      if (parts.length < 2) return null;
-      let hh = parseInt(parts[0],10);
-      const mm = parseInt(parts[1],10) || 0;
-      const ss = parts.length > 2 ? parseInt(parts[2],10) || 0 : 0;
-      const base = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate(), 0,0,0,0);
-      let dayOffset = 0;
-      if (hh >= 24) {
-        dayOffset = Math.floor(hh / 24);
-        hh = hh % 24;
+      let services = buildServiceCalendar(calendarRows, calendarDatesRows);
+      if ((!calendarRows || calendarRows.length === 0) && calendarDatesRows && calendarDatesRows.length > 0) {
+        // synthesize if calendar.txt missing
+        services = synthesizeServicesFromCalendarDates(calendarDatesRows);
       }
-      base.setDate(base.getDate() + dayOffset);
-      base.setHours(hh, mm, ss, 0);
-      return Math.floor(base.getTime() / 1000);
+      return { stops, trips, stop_times_by_stop, services };
     }
 
     fileInput.addEventListener('change', function(ev){
@@ -234,23 +230,30 @@
           if (p) found[r] = p;
         });
         listFound(found);
-        const missing = REQUIRED.filter(r => !found[r]);
-        if (missing.length > 0) {
-          setStatus('Missing Required GTFS files in the zip (' + missing.join(', ') + ')', 'err');
+        // calendar.txt optional if calendar_dates exists
+        const missingRequired = REQUIRED.filter(r => !found[r]);
+        if (missingRequired.length > 0) {
+          setStatus('Missing Required GTFS files in the zip (' + missingRequired.join(', ') + ')', 'err');
           return;
         }
+        // If calendar.txt missing and calendar_dates missing -> error
+        if (!found['calendar.txt'] && !found['calendar_dates.txt']) {
+          setStatus('Missing calendar.txt and calendar_dates.txt. One of these is required.', 'err');
+          return;
+        }
+
         setStatus('Found required files. Reading CSVs (this may take a few seconds)...');
         try {
           const stopsTxt = await zip.file(found['stops.txt']).async('string');
           const tripsTxt = await zip.file(found['trips.txt']).async('string');
           const stopTimesTxt = await zip.file(found['stop_times.txt']).async('string');
-          const calendarTxt = await zip.file(found['calendar.txt']).async('string');
+          const calendarTxt = found['calendar.txt'] ? await zip.file(found['calendar.txt']).async('string') : '';
           const calendarDatesTxt = found['calendar_dates.txt'] ? await zip.file(found['calendar_dates.txt']).async('string') : '';
           setStatus('Parsing CSV files...');
           const stopsRows = parseCSV(stopsTxt);
           const tripsRows = parseCSV(tripsTxt);
           const stopTimesRows = parseCSV(stopTimesTxt);
-          const calendarRows = parseCSV(calendarTxt);
+          const calendarRows = calendarTxt ? parseCSV(calendarTxt) : [];
           const calendarDatesRows = calendarDatesTxt ? parseCSV(calendarDatesTxt) : [];
           setStatus('Building compact index...');
           const compactIndex = buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows);
@@ -292,9 +295,7 @@
     copyBtn.addEventListener('click', function(){
       if (!lastPayload) return;
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(lastPayload).then(function(){ alert('JSON copied to clipboard.'); }).catch(function(){
-          fallbackCopy(lastPayload);
-        });
+        navigator.clipboard.writeText(lastPayload).then(function(){ alert('JSON copied to clipboard.'); }).catch(function(){ fallbackCopy(lastPayload); });
       } else {
         fallbackCopy(lastPayload);
       }
