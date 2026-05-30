@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Filter stop_times for Android</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 700px; }
+    textarea { width: 100%; height: 200px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>Filter stop_times.txt → stop_times_filtered.json</h1>
+
+  <p>This page extracts only the 5 stations you care about, producing a tiny file Android can handle.</p>
+
+  <label>
+    stop_times.txt:
+    <input type="file" id="fileInput" accept=".txt">
+  </label>
+
+  <button id="processBtn">Filter</button>
+
+  <h2>Output</h2>
+  <textarea id="output"></textarea>
+
+  <script>
+    const TARGET = new Set(["349","237","55","102","59"]);
+
+    document.getElementById("processBtn").onclick = async () => {
+      const file = document.getElementById("fileInput").files[0];
+      if (!file) {
+        alert("Select stop_times.txt first");
+        return;
+      }
+
+      const reader = file.stream().getReader();
+      const decoder = new TextDecoder();
+      let leftover = "";
+      let header = null;
+      let results = [];
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const text = leftover + decoder.decode(value, { stream: true });
+        const lines = text.split("\n");
+        leftover = lines.pop();
+
+        for (const line of lines) {
+          if (!header) {
+            header = line.split(",");
+            continue;
+          }
+          const cols = line.split(",");
+          const obj = {};
+          header.forEach((h,i)=>obj[h]=cols[i]);
+
+          if (TARGET.has(obj.stop_id)) {
+            results.push({
+              trip: obj.trip_id,
+              stop: obj.stop_id,
+              seq: parseInt(obj.stop_sequence,10)||0,
+              dep: obj.departure_time,
+              arr: obj.arrival_time
+            });
+          }
+        }
+      }
+
+      const json = JSON.stringify(results, null, 2);
+      document.getElementById("output").value = json;
+
+      const blob = new Blob([json], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "stop_times_filtered.json";
+      a.click();
+    };
+  </script>
+</body>
+</html>
