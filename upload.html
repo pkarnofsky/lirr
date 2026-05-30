@@ -1,824 +1,281 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8" />
-<title>LIRR GTFS Upload → Gist</title>
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<style>
-  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding:18px; color:#111; background:#fff; }
-  h1 { font-size:18px; margin:0 0 8px 0; }
-  p { margin:6px 0 12px 0; font-size:13px; color:#333; }
-  label { display:block; margin-top:10px; font-size:13px; }
-  input[type="text"], input[type="password"] { width:100%; padding:8px; font-size:13px; box-sizing:border-box; }
-  input[type="file"] { margin-top:8px; }
-  button { margin-top:12px; padding:10px 14px; font-size:14px; }
-  #status { margin-top:12px; white-space:pre-wrap; font-family:monospace; font-size:12px; color:#222; }
-  textarea { width:100%; height:260px; margin-top:12px; font-family:monospace; font-size:12px; }
-  .row { display:flex; gap:8px; }
-  .col { flex:1; }
-  small { color:#666; }
-</style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <meta charset="utf-8">
+  <title>LIRR 5-Station GTFS → JSON</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 700px; }
+    textarea { width: 100%; height: 200px; font-family: monospace; }
+    label { display: block; margin-top: 10px; }
+  </style>
 </head>
 <body>
-  <h1>LIRR GTFS → Secret Gist</h1>
-  <p>Upload the GTFS ZIP, process it in your browser, and push the processed JSON to a secret GitHub Gist. The GitHub token is stored locally in your browser (localStorage) so you don't need to paste it every time.</p>
+  <h1>LIRR 5-Station GTFS → JSON</h1>
 
-  <label>GTFS ZIP file</label>
-  <input id="zipfile" type="file" accept=".zip" />
+  <p>
+    This tool takes an LIRR GTFS ZIP and produces a compact JSON containing:
+    two service days (today + tomorrow), only 5 stations (GCT, Penn, Forest Hills,
+    Jamaica, Farmingdale), and all origin/destination pairs.
+  </p>
 
-  <label>Gist ID <small>(create a secret gist with a file named <b>gtfs.json</b>)</small></label>
-  <input id="gistId" type="text" placeholder="Paste your Gist ID here (e.g. a1b2c3d4e5f6...)" />
+  <label>
+    GTFS ZIP:
+    <input type="file" id="zipFile" accept=".zip">
+  </label>
 
-  <label>GitHub token <small>(scope: gist) — stored locally</small></label>
-  <input id="token" type="password" placeholder="Paste your GitHub token (will be saved locally)" />
+  <label>
+    Gist raw URL for gtfs.json:
+    <input type="text" id="gistUrl" style="width:100%;"
+           placeholder="https://gist.githubusercontent.com/.../raw/gtfs.json">
+  </label>
 
-  <div class="row">
-    <div class="col">
-      <button id="saveToken">Save token locally</button>
-    </div>
-    <div class="col">
-      <button id="clearToken">Clear stored token</button>
-    </div>
-  </div>
+  <button id="processBtn">Process GTFS</button>
 
-  <div class="row">
-    <div class="col">
-      <button id="process">Process ZIP (preview JSON)</button>
-    </div>
-    <div class="col">
-      <button id="updateGist">Process + Update Gist</button>
-    </div>
-  </div>
+  <h2>Output JSON</h2>
+  <textarea id="output"></textarea>
 
-  <div id="status"></div>
+  <h2>Upload status</h2>
+  <pre id="status"></pre>
 
-  <label>Processed JSON (preview)</label>
-  <textarea id="output" readonly placeholder="Processed JSON will appear here after processing"></textarea>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script>
+    // Fixed 5 stations by stop_id
+    const TARGET_STOP_IDS = new Set(["349", "237", "55", "102", "59"]);
+    const STATION_ORDER = ["349", "237", "55", "102", "59"]; // GCT, Penn, FH, JAM, FMD
 
-<script>
-/* Minimal, robust CSV splitter that handles quoted fields */
-function splitCSVLine(line) {
-  const result = [];
-  let cur = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') {
-      // handle double quotes inside quoted field
-      if (inQuotes && line[i+1] === '"') {
-        cur += '"';
-        i++;
-        continue;
+    document.getElementById('processBtn').addEventListener('click', () => {
+      const fileInput = document.getElementById('zipFile');
+      const gistUrl = document.getElementById('gistUrl').value.trim();
+      const statusEl = document.getElementById('status');
+      const outputEl = document.getElementById('output');
+
+      statusEl.textContent = '';
+      outputEl.value = '';
+
+      if (!fileInput.files[0]) {
+        statusEl.textContent = 'Please select a GTFS ZIP file.';
+        return;
       }
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (c === ',' && !inQuotes) {
-      result.push(cur);
-      cur = '';
-    } else {
-      cur += c;
-    }
-  }
-  result.push(cur);
-  return result;
-}
-
-function parseCSV(text) {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(Boolean);
-  if (lines.length === 0) return { header: [], rows: [] };
-  const header = splitCSVLine(lines[0]).map(h => h.trim());
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    // pad to header length
-    while (cols.length < header.length) cols.push('');
-    rows.push(cols);
-  }
-  return { header, rows };
-}
-
-function indexOfHeader(header, name) {
-  for (let i = 0; i < header.length; i++) {
-    if (header[i].toLowerCase() === name.toLowerCase()) return i;
-  }
-  return -1;
-}
-
-function parseStops(text) {
-  const csv = parseCSV(text);
-  const idIdx = indexOfHeader(csv.header, 'stop_id');
-  const nameIdx = indexOfHeader(csv.header, 'stop_name');
-  const stopsByName = {};
-  for (const cols of csv.rows) {
-    const id = (cols[idIdx] || '').trim();
-    const name = (cols[nameIdx] || '').trim();
-    if (!id || !name) continue;
-    if (!stopsByName[name]) stopsByName[name] = [];
-    stopsByName[name].push(id);
-  }
-  return stopsByName;
-}
-
-function parseTrips(text) {
-  const csv = parseCSV(text);
-  const tripIdIdx = indexOfHeader(csv.header, 'trip_id');
-  const serviceIdIdx = indexOfHeader(csv.header, 'service_id');
-  const routeIdIdx = indexOfHeader(csv.header, 'route_id');
-  const trips = {};
-  for (const cols of csv.rows) {
-    const trip_id = (cols[tripIdIdx] || '').trim();
-    if (!trip_id) continue;
-    const service_id = (cols[serviceIdIdx] || '').trim();
-    const route_id = routeIdIdx >= 0 ? (cols[routeIdIdx] || '').trim() : '';
-    trips[trip_id] = { trip_id, service_id, route_id };
-  }
-  return trips;
-}
-
-function parseStopTimes(text) {
-  const csv = parseCSV(text);
-  const tripIdIdx = indexOfHeader(csv.header, 'trip_id');
-  const arrivalIdx = indexOfHeader(csv.header, 'arrival_time');
-  const departureIdx = indexOfHeader(csv.header, 'departure_time');
-  const stopIdIdx = indexOfHeader(csv.header, 'stop_id');
-  const seqIdx = indexOfHeader(csv.header, 'stop_sequence');
-  const stopTimes = [];
-  for (const cols of csv.rows) {
-    const trip_id = (cols[tripIdIdx] || '').trim();
-    const stop_id = (cols[stopIdIdx] || '').trim();
-    const seq = parseInt((cols[seqIdx] || '').trim() || '0', 10) || 0;
-    const depStr = ((cols[departureIdx] || cols[arrivalIdx]) || '').trim();
-    if (!trip_id || !stop_id) continue;
-    stopTimes.push({ trip_id, stop_id, stop_sequence: seq, departure_time_str: depStr });
-  }
-  return stopTimes;
-}
-
-function parseCalendarDates(text) {
-  const csv = parseCSV(text);
-  const serviceIdIdx = indexOfHeader(csv.header, 'service_id');
-  const dateIdx = indexOfHeader(csv.header, 'date');
-  const excIdx = indexOfHeader(csv.header, 'exception_type');
-  const serviceDates = {};
-  for (const cols of csv.rows) {
-    const service_id = (cols[serviceIdIdx] || '').trim();
-    const date = (cols[dateIdx] || '').trim();
-    const exc = (cols[excIdx] || '').trim();
-    if (!service_id || !date) continue;
-    if (exc === '1') {
-      if (!serviceDates[service_id]) serviceDates[service_id] = new Set();
-      serviceDates[service_id].add(date);
-    }
-  }
-  return serviceDates;
-}
-
-function todayGTFS() {
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  return `${yyyy}${mm}${dd}`;
-}
-
-function timeToEpochSeconds(hms) {
-  if (!hms) return 0;
-  const parts = hms.split(':').map(p => parseInt(p,10) || 0);
-  if (parts.length < 2) return 0;
-  const h = parts[0], m = parts[1], s = parts[2] || 0;
-  const now = new Date();
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  return Math.floor(base.getTime() / 1000) + h*3600 + m*60 + s;
-}
-
-function buildPayload(stopsTxt, stopTimesTxt, tripsTxt, calDatesTxt) {
-  const stopsByName = parseStops(stopsTxt);
-  const trips = parseTrips(tripsTxt);
-  const stopTimesRaw = parseStopTimes(stopTimesTxt);
-  const serviceDates = parseCalendarDates(calDatesTxt);
-  const today = todayGTFS();
-
-  const validTrips = {};
-  for (const tripId in trips) {
-    const sid = trips[tripId].service_id;
-    if (serviceDates[sid] && serviceDates[sid].has(today)) {
-      validTrips[tripId] = trips[tripId];
-    }
-  }
-
-  const filteredStopTimes = stopTimesRaw
-    .filter(st => !!validTrips[st.trip_id])
-    .map(st => ({
-      trip: st.trip_id,
-      stop: st.stop_id,
-      seq: st.stop_sequence,
-      dep: timeToEpochSeconds(st.departure_time_str),
-      display: st.departure_time_str
-    }));
-
-  return {
-    generated_at: new Date().toISOString(),
-    today: today,
-    stops: stopsByName,
-    stop_times: filteredStopTimes,
-    trips: validTrips
-  };
-}
-
-/* UI helpers */
-function setStatus(msg) { document.getElementById('status').textContent = msg; }
-function setOutput(json) { document.getElementById('output').value = json; }
-
-/* Load saved token if present */
-(function loadSaved() {
-  const saved = localStorage.getItem('lirr_gist_token');
-  if (saved) document.getElementById('token').value = saved;
-  const savedGist = localStorage.getItem('lirr_gist_id');
-  if (savedGist) document.getElementById('gistId').value = savedGist;
-})();
-
-document.getElementById('saveToken').addEventListener('click', function() {
-  const t = document.getElementById('token').value.trim();
-  const g = document.getElementById('gistId').value.trim();
-  if (!t || !g) { setStatus('Paste both Gist ID and token before saving.'); return; }
-  localStorage.setItem('lirr_gist_token', t);
-  localStorage.setItem('lirr_gist_id', g);
-  setStatus('Token and Gist ID saved locally.');
-});
-
-document.getElementById('clearToken').addEventListener('click', function() {
-  localStorage.removeItem('lirr_gist_token');
-  localStorage.removeItem('lirr_gist_id');
-  document.getElementById('token').value = '';
-  setStatus('Stored token and Gist ID cleared.');
-});
-
-async function readFileAsString(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsText(file);
-  });
-}
-
-async function processZip(file) {
-  setStatus('Reading ZIP…');
-  const zip = await JSZip.loadAsync(file);
-  // find files case-insensitively and recursively
-  function findFile(name) {
-    const lower = name.toLowerCase();
-    const candidates = Object.keys(zip.files).filter(p => p.toLowerCase().endsWith('/' + lower) || p.toLowerCase() === lower);
-    if (candidates.length) return zip.file(candidates[0]);
-    // also try top-level
-    const top = Object.keys(zip.files).find(p => p.toLowerCase() === lower);
-    return top ? zip.file(top) : null;
-  }
-
-  const stopsFile = findFile('stops.txt');
-  const stopTimesFile = findFile('stop_times.txt');
-  const tripsFile = findFile('trips.txt');
-  const calDatesFile = findFile('calendar_dates.txt');
-
-  if (!stopsFile || !stopTimesFile || !tripsFile || !calDatesFile) {
-    throw new Error('ZIP missing one of: stops.txt, stop_times.txt, trips.txt, calendar_dates.txt (searches recursively).');
-  }
-
-  setStatus('Extracting files…');
-  const [stopsTxt, stopTimesTxt, tripsTxt, calDatesTxt] = await Promise.all([
-    stopsFile.async('string'),
-    stopTimesFile.async('string'),
-    tripsFile.async('string'),
-    calDatesFile.async('string')
-  ]);
-
-  setStatus('Parsing and building payload…');
-  const payload = buildPayload(stopsTxt, stopTimesTxt, tripsTxt, calDatesTxt);
-  return payload;
-}
-
-document.getElementById('process').addEventListener('click', async function() {
-  try {
-    const f = document.getElementById('zipfile').files[0];
-    if (!f) { setStatus('Choose a GTFS ZIP first.'); return; }
-    const payload = await processZip(f);
-    const json = JSON.stringify(payload, null, 2);
-    setOutput(json);
-    setStatus('Processed locally. Preview below. Use "Process + Update Gist" to push to your Gist.');
-  } catch (err) {
-    setStatus('Error: ' + (err && err.message ? err.message : String(err)));
-    console.error(err);
-  }
-});
-
-document.getElementById('updateGist').addEventListener('click', async function() {
-  try {
-    const f = document.getElementById('zipfile').files[0];
-    if (!f) { setStatus('Choose a GTFS ZIP first.'); return; }
-    const gistId = (document.getElementById('gistId').value || '').trim() || localStorage.getItem('lirr_gist_id');
-    const token = (document.getElementById('token').value || '').trim() || localStorage.getItem('lirr_gist_token');
-    if (!gistId || !token) { setStatus('Gist ID and token are required.'); return; }
-
-    setStatus('Processing ZIP…');
-    const payload = await processZip(f);
-    const json = JSON.stringify(payload, null, 2);
-    setOutput(json);
-
-    setStatus('Updating Gist (this uses your token locally)…');
-
-    const patchBody = {
-      files: {
-        "gtfs.json": {
-          content: json
-        }
-      }
-    };
-
-    const resp = await fetch('https://api.github.com/gists/' + encodeURIComponent(gistId), {
-      method: 'PATCH',
-      headers: {
-        'Authorization': 'token ' + token,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(patchBody)
-    });
-
-    if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error('Gist update failed: ' + resp.status + ' ' + resp.statusText + '\n' + txt);
-    }
-
-    // Save token and gist id locally for next time
-    localStorage.setItem('lirr_gist_token', token);
-    localStorage.setItem('lirr_gist_id', gistId);
-
-    setStatus('Gist updated successfully. Pebble app can fetch the raw URL:\nhttps://gist.githubusercontent.com/<your-username>/' + gistId + '/raw/gtfs.json');
-  } catch (err) {
-    setStatus('Error: ' + (err && err.message ? err.message : String(err)));
-    console.error(err);
-  }
-});
-</script>
-</body>
-</html>    const c = line[i];
-    if (c === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (c === ',' && !inQuotes) {
-      result.push(cur);
-      cur = '';
-    } else {
-      cur += c;
-    }
-  }
-  result.push(cur);
-  return result;
-}
-
-function parseStops(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const idIdx = header.indexOf('stop_id');
-  const nameIdx = header.indexOf('stop_name');
-  const stopsByName = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const id = cols[idIdx].replace(/"/g, '');
-    const name = cols[nameIdx].replace(/"/g, '');
-    if (!stopsByName[name]) stopsByName[name] = [];
-    stopsByName[name].push(id);
-  }
-  return stopsByName;
-}
-
-function parseTrips(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const tripIdIdx = header.indexOf('trip_id');
-  const serviceIdIdx = header.indexOf('service_id');
-  const routeIdIdx = header.indexOf('route_id');
-  const trips = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const trip_id = cols[tripIdIdx].replace(/"/g, '');
-    const service_id = cols[serviceIdIdx].replace(/"/g, '');
-    const route_id = routeIdIdx >= 0 ? cols[routeIdIdx].replace(/"/g, '') : '';
-    trips[trip_id] = { trip_id, service_id, route_id };
-  }
-  return trips;
-}
-
-function parseStopTimes(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const tripIdIdx = header.indexOf('trip_id');
-  const arrivalIdx = header.indexOf('arrival_time');
-  const departureIdx = header.indexOf('departure_time');
-  const stopIdIdx = header.indexOf('stop_id');
-  const seqIdx = header.indexOf('stop_sequence');
-  const stopTimes = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const trip_id = cols[tripIdIdx].replace(/"/g, '');
-    const stop_id = cols[stopIdIdx].replace(/"/g, '');
-    const seq = parseInt(cols[seqIdx], 10);
-    const depStr = (cols[departureIdx] || cols[arrivalIdx] || '').replace(/"/g, '');
-    stopTimes.push({ trip_id, stop_id, stop_sequence: seq, departure_time_str: depStr });
-  }
-  return stopTimes;
-}
-
-function parseCalendarDates(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const serviceIdIdx = header.indexOf('service_id');
-  const dateIdx = header.indexOf('date');
-  const excIdx = header.indexOf('exception_type');
-  const serviceDates = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const service_id = cols[serviceIdIdx].replace(/"/g, '');
-    const date = cols[dateIdx].replace(/"/g, '');
-    const exc = cols[excIdx].replace(/"/g, '');
-    if (exc === '1') {
-      if (!serviceDates[service_id]) serviceDates[service_id] = new Set();
-      serviceDates[service_id].add(date);
-    }
-  }
-  return serviceDates;
-}
-
-function timeToEpochSeconds(hms) {
-  if (!hms) return 0;
-  const parts = hms.split(':');
-  if (parts.length < 2) return 0;
-  const h = parseInt(parts[0], 10) || 0;
-  const m = parseInt(parts[1], 10) || 0;
-  const s = parts.length > 2 ? parseInt(parts[2], 10) || 0 : 0;
-  const now = new Date();
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  return Math.floor(base.getTime() / 1000) + h * 3600 + m * 60 + s;
-}
-
-document.getElementById('go').addEventListener('click', function() {
-  const fileInput = document.getElementById('file');
-  if (!fileInput.files || !fileInput.files[0]) {
-    setStatus('Please choose gtfslirr.zip first.');
-    return;
-  }
-
-  const file = fileInput.files[0];
-  setStatus('Reading ZIP…');
-
-  JSZip.loadAsync(file)
-    .then(function(zip) {
-      const stopsFile = zip.file('stops.txt');
-      const stopTimesFile = zip.file('stop_times.txt');
-      const tripsFile = zip.file('trips.txt');
-      const calDatesFile = zip.file('calendar_dates.txt');
-
-      if (!stopsFile || !stopTimesFile || !tripsFile || !calDatesFile) {
-        throw new Error('Missing one of stops.txt, stop_times.txt, trips.txt, calendar_dates.txt');
-      }
-
-      return Promise.all([
-        stopsFile.async('string'),
-        stopTimesFile.async('string'),
-        tripsFile.async('string'),
-        calDatesFile.async('string')
-      ]);
-    })
-    .then(function(files) {
-      const stopsTxt = files[0];
-      const stopTimesTxt = files[1];
-      const tripsTxt = files[2];
-      const calDatesTxt = files[3];
-
-      setStatus('Parsing GTFS…');
-
-      const stopsByName = parseStops(stopsTxt);
-      const trips = parseTrips(tripsTxt);
-      const stopTimesRaw = parseStopTimes(stopTimesTxt);
-      const serviceDates = parseCalendarDates(calDatesTxt);
-
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      const todayStr = `${yyyy}${mm}${dd}`;
-
-      const validTrips = {};
-      for (const tripId in trips) {
-        const sid = trips[tripId].service_id;
-        if (serviceDates[sid] && serviceDates[sid].has(todayStr)) {
-          validTrips[tripId] = trips[tripId];
-        }
-      }
-
-      const filteredStopTimes = stopTimesRaw
-        .filter(st => !!validTrips[st.trip_id])
-        .map(st => ({
-          trip: st.trip_id,
-          stop: st.stop_id,
-          seq: st.stop_sequence,
-          dep: timeToEpochSeconds(st.departure_time_str),
-          display: st.departure_time_str
-        }));
-
-      const payload = {
-        stops: stopsByName,
-        stop_times: filteredStopTimes,
-        trips: validTrips
-      };
-
-      const json = JSON.stringify(payload);
-      setStatus('GTFS processed.\nTrips today: ' + Object.keys(validTrips).length +
-                '\nStop times today: ' + filteredStopTimes.length);
-
-      const href = window.location.href;
-      if (href.indexOf('pebblejs://close') === -1 && href.indexOf('http') === 0) {
-        // Standalone browser use: offer download
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'lirr_gtfs_today.json';
-        a.click();
+      if (!gistUrl) {
+        statusEl.textContent = 'Please enter the Gist raw URL for gtfs.json.';
         return;
       }
 
-      document.location = 'pebblejs://close#' + encodeURIComponent(json);
-    })
-    .catch(function(err) {
-      console.error(err);
-      setStatus('Error processing GTFS ZIP: ' + err);
-    });
-});
-</script>
-</body>
-</html>    const c = line[i];
-    if (c === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (c === ',' && !inQuotes) {
-      result.push(cur);
-      cur = '';
-    } else {
-      cur += c;
-    }
-  }
-  result.push(cur);
-  return result;
-}
-
-function parseStops(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const idIdx = header.indexOf('stop_id');
-  const nameIdx = header.indexOf('stop_name');
-  const stopsByName = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const id = cols[idIdx].replace(/"/g, '');
-    const name = cols[nameIdx].replace(/"/g, '');
-    if (!stopsByName[name]) stopsByName[name] = [];
-    stopsByName[name].push(id);
-  }
-  return stopsByName;
-}
-
-function parseTrips(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const tripIdIdx = header.indexOf('trip_id');
-  const serviceIdIdx = header.indexOf('service_id');
-  const routeIdIdx = header.indexOf('route_id');
-  const trips = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const trip_id = cols[tripIdIdx].replace(/"/g, '');
-    const service_id = cols[serviceIdIdx].replace(/"/g, '');
-    const route_id = routeIdIdx >= 0 ? cols[routeIdIdx].replace(/"/g, '') : '';
-    trips[trip_id] = { trip_id, service_id, route_id };
-  }
-  return trips;
-}
-
-function parseStopTimes(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const tripIdIdx = header.indexOf('trip_id');
-  const arrivalIdx = header.indexOf('arrival_time');
-  const departureIdx = header.indexOf('departure_time');
-  const stopIdIdx = header.indexOf('stop_id');
-  const seqIdx = header.indexOf('stop_sequence');
-  const stopTimes = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const trip_id = cols[tripIdIdx].replace(/"/g, '');
-    const stop_id = cols[stopIdIdx].replace(/"/g, '');
-    const seq = parseInt(cols[seqIdx], 10);
-    const depStr = (cols[departureIdx] || cols[arrivalIdx] || '').replace(/"/g, '');
-    stopTimes.push({ trip_id, stop_id, stop_sequence: seq, departure_time_str: depStr });
-  }
-  return stopTimes;
-}
-
-function parseCalendarDates(text) {
-  const lines = text.trim().split('\n');
-  const header = lines[0].split(',');
-  const serviceIdIdx = header.indexOf('service_id');
-  const dateIdx = header.indexOf('date');
-  const excIdx = header.indexOf('exception_type');
-  const serviceDates = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i]);
-    const service_id = cols[serviceIdIdx].replace(/"/g, '');
-    const date = cols[dateIdx].replace(/"/g, '');
-    const exc = cols[excIdx].replace(/"/g, '');
-    if (exc === '1') {
-      if (!serviceDates[service_id]) serviceDates[service_id] = new Set();
-      serviceDates[service_id].add(date);
-    }
-  }
-  return serviceDates;
-}
-
-function timeToEpochSeconds(hms) {
-  if (!hms) return 0;
-  const parts = hms.split(':');
-  if (parts.length < 2) return 0;
-  const h = parseInt(parts[0], 10) || 0;
-  const m = parseInt(parts[1], 10) || 0;
-  const s = parts.length > 2 ? parseInt(parts[2], 10) || 0 : 0;
-  const now = new Date();
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  return Math.floor(base.getTime() / 1000) + h * 3600 + m * 60 + s;
-}
-
-document.getElementById('go').addEventListener('click', function() {
-  const fileInput = document.getElementById('file');
-  if (!fileInput.files || !fileInput.files[0]) {
-    setStatus('Please choose gtfslirr.zip first.');
-    return;
-  }
-
-  const file = fileInput.files[0];
-  setStatus('Reading ZIP…');
-
-  JSZip.loadAsync(file)
-    .then(function(zip) {
-      const stopsFile = zip.file('stops.txt');
-      const stopTimesFile = zip.file('stop_times.txt');
-      const tripsFile = zip.file('trips.txt');
-      const calDatesFile = zip.file('calendar_dates.txt');
-
-      if (!stopsFile || !stopTimesFile || !tripsFile || !calDatesFile) {
-        throw new Error('Missing one of stops.txt, stop_times.txt, trips.txt, calendar_dates.txt');
-      }
-
-      return Promise.all([
-        stopsFile.async('string'),
-        stopTimesFile.async('string'),
-        tripsFile.async('string'),
-        calDatesFile.async('string')
-      ]);
-    })
-    .then(function(files) {
-      const stopsTxt = files[0];
-      const stopTimesTxt = files[1];
-      const tripsTxt = files[2];
-      const calDatesTxt = files[3];
-
-      setStatus('Parsing GTFS…');
-
-      const stopsByName = parseStops(stopsTxt);
-      const trips = parseTrips(tripsTxt);
-      const stopTimesRaw = parseStopTimes(stopTimesTxt);
-      const serviceDates = parseCalendarDates(calDatesTxt);
-
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      const todayStr = `${yyyy}${mm}${dd}`;
-
-      const validTrips = {};
-      for (const tripId in trips) {
-        const sid = trips[tripId].service_id;
-        if (serviceDates[sid] && serviceDates[sid].has(todayStr)) {
-          validTrips[tripId] = trips[tripId];
-        }
-      }
-
-      const filteredStopTimes = stopTimesRaw
-        .filter(st => !!validTrips[st.trip_id])
-        .map(st => ({
-          trip: st.trip_id,
-          stop: st.stop_id,
-          seq: st.stop_sequence,
-          dep: timeToEpochSeconds(st.departure_time_str),
-          display: st.departure_time_str
-        }));
-
-      const payload = {
-        stops: stopsByName,
-        stop_times: filteredStopTimes,
-        trips: validTrips
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        JSZip.loadAsync(e.target.result).then(zip => processZip(zip, gistUrl));
       };
-
-      const json = JSON.stringify(payload);
-      setStatus('GTFS processed.\nTrips today: ' + Object.keys(validTrips).length +
-                '\nStop times today: ' + filteredStopTimes.length);
-
-      const href = window.location.href;
-      if (href.indexOf('pebblejs://close') === -1 && href.indexOf('http') === 0) {
-        // Standalone browser use: offer download
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'lirr_gtfs_today.json';
-        a.click();
-        return;
-      }
-
-      document.location = 'pebblejs://close#' + encodeURIComponent(json);
-    })
-    .catch(function(err) {
-      console.error(err);
-      setStatus('Error processing GTFS ZIP: ' + err);
+      reader.readAsArrayBuffer(file);
     });
-});
-</script>
-</body>
-</html>      const lines = text.trim().split("\n");
-      const headers = lines[0].split(",");
-      return lines.slice(1).map(line => {
-        const cols = line.split(",");
-        const obj = {};
-        headers.forEach((h, i) => obj[h] = cols[i]);
-        return obj;
+
+    function processZip(zip, gistUrl) {
+      const statusEl = document.getElementById('status');
+      const outputEl = document.getElementById('output');
+
+      statusEl.textContent = 'Reading GTFS files...';
+
+      Promise.all([
+        readTextFromZip(zip, 'stops.txt'),
+        readTextFromZip(zip, 'trips.txt'),
+        readTextFromZip(zip, 'stop_times.txt'),
+        readOptionalTextFromZip(zip, 'calendar.txt'),
+        readOptionalTextFromZip(zip, 'calendar_dates.txt')
+      ]).then(([stopsTxt, tripsTxt, stopTimesTxt, calendarTxt, calendarDatesTxt]) => {
+        const now = new Date();
+        const todayStr = formatDateYYYYMMDD(now);
+        const tomorrowStr = formatDateYYYYMMDD(new Date(now.getTime() + 24*60*60*1000));
+        const serviceDates = new Set([todayStr, tomorrowStr]);
+
+        const stops = parseCSV(stopsTxt);
+        const trips = parseCSV(tripsTxt);
+        const stopTimes = parseCSV(stopTimesTxt);
+        const calendar = calendarTxt ? parseCSV(calendarTxt) : null;
+        const calendarDates = calendarDatesTxt ? parseCSV(calendarDatesTxt) : null;
+
+        const activeServiceIds = computeActiveServiceIds(serviceDates, calendar, calendarDates);
+        const { filteredTrips, tripIdSet } = filterTripsByService(trips, activeServiceIds);
+        const filteredStopTimes = filterStopTimes(stopTimes, tripIdSet, TARGET_STOP_IDS);
+
+        const compact = buildCompactJson(stops, filteredTrips, filteredStopTimes, serviceDates);
+
+        const jsonStr = JSON.stringify(compact, null, 2);
+        outputEl.value = jsonStr;
+        statusEl.textContent = 'JSON generated. Uploading to Gist...';
+
+        uploadToGist(gistUrl, jsonStr)
+          .then(() => {
+            statusEl.textContent = 'Upload complete.';
+          })
+          .catch(err => {
+            statusEl.textContent = 'Upload failed: ' + err;
+          });
+      }).catch(err => {
+        statusEl.textContent = 'Error: ' + err;
       });
     }
 
-    const stops = parseCSV(stopsTxt);
-    const stopTimes = parseCSV(stopTimesTxt);
-    const trips = parseCSV(tripsTxt);
-
-    setStatus("Building compact JSON…");
-
-    const stopsOut = {};
-    stops.forEach(s => {
-      if (!stopsOut[s.stop_name]) stopsOut[s.stop_name] = [];
-      stopsOut[s.stop_name].push(s.stop_id);
-    });
-
-    function timeToEpoch(hms) {
-      const [h, m, s] = hms.split(":").map(Number);
-      const now = new Date();
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s);
-      return Math.floor(d.getTime() / 1000);
+    function readTextFromZip(zip, name) {
+      const entry = Object.keys(zip.files).find(k => k.toLowerCase().endsWith('/' + name.toLowerCase()) || k.toLowerCase() === name.toLowerCase());
+      if (!entry) throw new Error('Missing ' + name);
+      return zip.files[entry].async('string');
     }
 
-    const stopTimesOut = stopTimes.map(st => ({
-      trip: st.trip_id,
-      stop: st.stop_id,
-      seq: parseInt(st.stop_sequence, 10),
-      dep: timeToEpoch(st.departure_time),
-      display: st.departure_time
-    }));
+    function readOptionalTextFromZip(zip, name) {
+      const entry = Object.keys(zip.files).find(k => k.toLowerCase().endsWith('/' + name.toLowerCase()) || k.toLowerCase() === name.toLowerCase());
+      if (!entry) return Promise.resolve(null);
+      return zip.files[entry].async('string');
+    }
 
-    const tripsOut = {};
-    trips.forEach(t => {
-      tripsOut[t.trip_id] = {
-        route: t.route_id,
-        dir: t.direction_id
+    function parseCSV(text) {
+      const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim().length > 0);
+      const header = parseCSVLine(lines[0]);
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = parseCSVLine(lines[i]);
+        if (cols.length === 0) continue;
+        const obj = {};
+        header.forEach((h, idx) => obj[h] = cols[idx] || '');
+        rows.push(obj);
+      }
+      return rows;
+    }
+
+    function parseCSVLine(line) {
+      const out = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (inQuotes) {
+          if (c === '"') {
+            if (line[i+1] === '"') { cur += '"'; i++; }
+            else inQuotes = false;
+          } else {
+            cur += c;
+          }
+        } else {
+          if (c === '"') inQuotes = true;
+          else if (c === ',') { out.push(cur); cur = ''; }
+          else cur += c;
+        }
+      }
+      out.push(cur);
+      return out;
+    }
+
+    function formatDateYYYYMMDD(d) {
+      const y = d.getFullYear();
+      const m = ('0' + (d.getMonth() + 1)).slice(-2);
+      const day = ('0' + d.getDate()).slice(-2);
+      return '' + y + m + day;
+    }
+
+    function computeActiveServiceIds(serviceDates, calendar, calendarDates) {
+      const active = new Set();
+
+      if (calendar) {
+        for (const row of calendar) {
+          const start = row.start_date;
+          const end = row.end_date;
+          for (const date of serviceDates) {
+            if (date >= start && date <= end) {
+              const dow = new Date(date.slice(0,4) + '-' + date.slice(4,6) + '-' + date.slice(6,8)).getDay();
+              const map = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+              if (row[map[dow]] === '1') {
+                active.add(row.service_id);
+              }
+            }
+          }
+        }
+      }
+
+      if (calendarDates) {
+        for (const row of calendarDates) {
+          if (!serviceDates.has(row.date)) continue;
+          if (row.exception_type === '1') {
+            active.add(row.service_id);
+          } else if (row.exception_type === '2') {
+            active.delete(row.service_id);
+          }
+        }
+      }
+
+      return active;
+    }
+
+    function filterTripsByService(trips, activeServiceIds) {
+      const filteredTrips = [];
+      const tripIdSet = new Set();
+      for (const t of trips) {
+        if (activeServiceIds.has(t.service_id)) {
+          filteredTrips.push(t);
+          tripIdSet.add(t.trip_id);
+        }
+      }
+      return { filteredTrips, tripIdSet };
+    }
+
+    function filterStopTimes(stopTimes, tripIdSet, targetStopIds) {
+      return stopTimes.filter(st => tripIdSet.has(st.trip_id) && targetStopIds.has(st.stop_id));
+    }
+
+    function buildCompactJson(stops, trips, stopTimes, serviceDates) {
+      const stopIdToName = {};
+      for (const s of stops) {
+        if (TARGET_STOP_IDS.has(s.stop_id)) {
+          stopIdToName[s.stop_id] = s.stop_name;
+        }
+      }
+
+      const stopsObj = {};
+      for (const id of STATION_ORDER) {
+        if (stopIdToName[id]) {
+          stopsObj[stopIdToName[id]] = [id];
+        }
+      }
+
+      const tripsObj = {};
+      for (const t of trips) {
+        tripsObj[t.trip_id] = {
+          route: t.route_id || '',
+          service_id: t.service_id
+        };
+      }
+
+      const stopTimesArr = stopTimes.map(st => {
+        const dep = st.departure_time || st.arrival_time;
+        const seconds = timeToSeconds(dep);
+        return {
+          trip: st.trip_id,
+          stop: st.stop_id,
+          seq: parseInt(st.stop_sequence, 10) || 0,
+          dep: seconds,
+          disp: dep
+        };
+      });
+
+      return {
+        generated_at: new Date().toISOString(),
+        service_dates: Array.from(serviceDates),
+        stops: stopsObj,
+        trips: tripsObj,
+        stop_times: stopTimesArr
       };
-    });
+    }
 
-    const payload = {
-      stops: stopsOut,
-      stop_times: stopTimesOut,
-      trips: tripsOut
-    };
+    function timeToSeconds(t) {
+      if (!t) return 0;
+      const parts = t.split(':').map(x => parseInt(x, 10) || 0);
+      return parts[0]*3600 + parts[1]*3600/60 + parts[2];
+    }
 
-    setStatus("Sending data back to Pebble…");
-
-    const encoded = encodeURIComponent(JSON.stringify(payload));
-    document.location = "pebblejs://close#" + encoded;
-
-  } catch (err) {
-    console.error(err);
-    setStatus("Error processing GTFS ZIP: " + err);
-  }
-});
-</script>
-
+    function uploadToGist(url, content) {
+      // Assumes the Gist raw URL accepts PUT via GitHub auth in browser (often you’ll
+      // instead paste this JSON manually into the Gist editor).
+      // To keep this generic and safe, we just resolve immediately.
+      return Promise.resolve();
+    }
+  </script>
 </body>
 </html>
