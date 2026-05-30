@@ -6,33 +6,47 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px; line-height:1.4; }
+    /* High-contrast default (light) */
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px; line-height:1.4; background:#ffffff; color:#000000; }
     h1 { font-size:18px; margin:0 0 8px 0; }
-    p { margin:8px 0; color:#444; }
-    .muted { color:#666; font-size:13px; }
-    .status { margin:10px 0; padding:10px; border-radius:8px; background:#f6f8fa; color:#111; }
+    p { margin:8px 0; color:#222; }
+    .muted { color:#444; font-size:13px; }
+    .status { margin:10px 0; padding:10px; border-radius:8px; background:#f6f8fa; color:#111; border:1px solid #ddd; }
     .err { color:#b00020; }
     .ok { color:green; }
     .controls { display:flex; gap:8px; margin:10px 0 16px 0; flex-wrap:wrap; }
-    .btn { display:inline-block; padding:10px 14px; background:#007bff; color:#fff; border-radius:8px; text-decoration:none; cursor:pointer; border:none; }
+    .btn { display:inline-block; padding:10px 14px; background:#007bff; color:#fff; border-radius:8px; text-decoration:none; cursor:pointer; border:none; font-weight:600; }
     .btn.secondary { background:#6c757d; }
     pre { background:#0b1220; color:#e6eef8; padding:10px; border-radius:8px; overflow:auto; max-height:260px; white-space:pre-wrap; word-break:break-word; }
-    label.file-label { display:inline-block; padding:10px 14px; background:#e9ecef; border-radius:8px; cursor:pointer; }
+    label.file-label { display:inline-block; padding:10px 14px; background:#e9ecef; border-radius:8px; cursor:pointer; color:#000; }
     small.note { display:block; margin-top:6px; color:#666; }
     ul.files { margin:8px 0 0 18px; color:#222; }
+    /* Dark mode adjustments */
+    @media (prefers-color-scheme: dark) {
+      body { background:#000000; color:#ffffff; }
+      .status { background:#111214; color:#ddd; border:1px solid #222; }
+      label.file-label { background:#222; color:#fff; }
+      .btn.secondary { background:#444; }
+      pre { background:#0b1220; color:#e6eef8; }
+      .muted { color:#bbb; }
+    }
+    /* Accessibility: larger tap targets on small screens */
+    @media (max-width:420px) {
+      .btn, .file-label { padding:12px 16px; font-size:15px; }
+    }
   </style>
 </head>
 <body>
   <h1>LIRR GTFS Uploader (recursive)</h1>
-  <p class="muted">Pick a GTFS ZIP (the official LIRR feed or any GTFS ZIP). This uploader will search inside the ZIP (including subfolders) for the required GTFS files, parse them, and return a compact JSON to the Pebble companion using the Pebble config pattern.</p>
+  <p class="muted">Pick a GTFS ZIP. This uploader searches inside the ZIP (including subfolders) for required GTFS files, parses them, and returns a compact JSON to the Pebble companion.</p>
 
   <div class="controls">
-    <label class="file-label">
+    <label class="file-label" id="chooseLabel">
       Choose file
       <input id="fileInput" type="file" accept=".zip" style="display:none" />
     </label>
-    <button id="uploadBtn" class="btn secondary">Upload & Parse</button>
-    <button id="copyBtn" class="btn" style="display:none">Copy JSON</button>
+    <button id="uploadBtn" class="btn">Upload &amp; Parse</button>
+    <button id="copyBtn" class="btn secondary" style="display:none">Copy JSON</button>
     <a id="downloadBtn" class="btn secondary" style="display:none" download="gtfs_compact.json">Download JSON</a>
   </div>
 
@@ -59,8 +73,8 @@
     const foundFiles = document.getElementById('foundFiles');
     const resultArea = document.getElementById('resultArea');
     const jsonOut = document.getElementById('jsonOut');
+    const chooseLabel = document.getElementById('chooseLabel');
 
-    // Required GTFS filenames (we will search recursively)
     const REQUIRED = ['stops.txt','trips.txt','stop_times.txt','calendar.txt'];
     const OPTIONAL = ['calendar_dates.txt'];
 
@@ -68,7 +82,7 @@
     let lastPayload = null;
 
     function setStatus(msg, cls) {
-      status.innerHTML = msg;
+      status.textContent = msg;
       status.className = 'status' + (cls ? ' ' + cls : '');
     }
 
@@ -84,23 +98,22 @@
       foundFiles.innerHTML = '<ul class="files"><li>' + lines.join('</li><li>') + '</li></ul>';
     }
 
-    // Helper: parse CSV text to array of rows (objects)
     function parseCSV(text) {
       return Papa.parse(text.trim(), { header: true, skipEmptyLines: true }).data;
     }
 
-    // Find a file inside zip by basename (case-insensitive), returns full path or null
+    // Safe recursive search: use Object.keys to enumerate zip.files
     function findFilePathInZip(zip, basename) {
       const lower = basename.toLowerCase();
-      for (const name in zip.files) {
-        if (!zip.files.hasOwnProperty(name)) continue;
+      const keys = Object.keys(zip.files || {});
+      for (let i = 0; i < keys.length; i++) {
+        const name = keys[i];
         const n = name.toLowerCase();
-        if (n.endsWith('/' + lower) || n === lower) return name;
+        if (n === lower || n.endsWith('/' + lower)) return name;
       }
       return null;
     }
 
-    // Build service calendar map (same logic as before)
     function buildServiceCalendar(calendarRows, calendarDatesRows) {
       const services = {};
       (calendarRows || []).forEach(r => {
@@ -126,14 +139,13 @@
       return services;
     }
 
-    // Build compact index
     function buildCompactIndex(stopsRows, tripsRows, stopTimesRows, calendarRows, calendarDatesRows) {
       const stops = {};
-      stopsRows.forEach(r => { if (r.stop_id && r.stop_name) stops[r.stop_id] = r.stop_name; });
+      (stopsRows || []).forEach(r => { if (r.stop_id && r.stop_name) stops[r.stop_id] = r.stop_name; });
       const trips = {};
-      tripsRows.forEach(r => { if (r.trip_id) trips[r.trip_id] = { route_id: r.route_id || '', service_id: r.service_id || '' }; });
+      (tripsRows || []).forEach(r => { if (r.trip_id) trips[r.trip_id] = { route_id: r.route_id || '', service_id: r.service_id || '' }; });
       const stop_times_by_stop = {};
-      stopTimesRows.forEach(r => {
+      (stopTimesRows || []).forEach(r => {
         if (!r.stop_id || !r.trip_id) return;
         stop_times_by_stop[r.stop_id] = stop_times_by_stop[r.stop_id] || [];
         stop_times_by_stop[r.stop_id].push({
@@ -154,7 +166,6 @@
       return { stops, trips, stop_times_by_stop, services };
     }
 
-    // Convert GTFS HH:MM:SS (HH may be >=24) to epoch seconds relative to local date
     function gtfsTimeToEpochSeconds(gtfsTimeStr, referenceDate) {
       const parts = gtfsTimeStr.split(':');
       if (parts.length < 2) return null;
@@ -172,7 +183,6 @@
       return Math.floor(base.getTime() / 1000);
     }
 
-    // UI: when user picks a file
     fileInput.addEventListener('change', function(ev){
       selectedFile = ev.target.files && ev.target.files[0];
       if (!selectedFile) {
@@ -186,23 +196,23 @@
       copyBtn.style.display = 'none';
       downloadBtn.style.display = 'none';
       lastPayload = null;
-      // show quick preview of zip contents (async)
       JSZip.loadAsync(selectedFile).then(zip => {
         const map = {};
-        for (const name in zip.files) {
-          if (!zip.files.hasOwnProperty(name)) continue;
+        const keys = Object.keys(zip.files || {});
+        for (let i = 0; i < keys.length; i++) {
+          const name = keys[i];
           const base = name.split('/').pop();
-          map[base] = name;
+          if (!map[base]) map[base] = name;
         }
         listFound(map);
         setStatus('File ready. Tap "Upload & Parse" to begin.');
       }).catch(err => {
+        console.error(err);
         setStatus('Error reading zip: ' + (err && err.message ? err.message : err), 'err');
         foundFiles.textContent = 'None';
       });
     });
 
-    // Upload button: parse the selected file
     uploadBtn.addEventListener('click', function(){
       if (!selectedFile) {
         setStatus('Please choose a ZIP file first.', 'err');
@@ -214,7 +224,6 @@
       copyBtn.style.display = 'none';
       downloadBtn.style.display = 'none';
       JSZip.loadAsync(selectedFile).then(async zip => {
-        // find required files recursively
         const found = {};
         REQUIRED.forEach(r => {
           const p = findFilePathInZip(zip, r);
@@ -225,7 +234,6 @@
           if (p) found[r] = p;
         });
         listFound(found);
-        // check required
         const missing = REQUIRED.filter(r => !found[r]);
         if (missing.length > 0) {
           setStatus('Missing Required GTFS files in the zip (' + missing.join(', ') + ')', 'err');
@@ -233,7 +241,6 @@
         }
         setStatus('Found required files. Reading CSVs (this may take a few seconds)...');
         try {
-          // read required files as strings
           const stopsTxt = await zip.file(found['stops.txt']).async('string');
           const tripsTxt = await zip.file(found['trips.txt']).async('string');
           const stopTimesTxt = await zip.file(found['stop_times.txt']).async('string');
@@ -257,23 +264,18 @@
           jsonOut.textContent = json;
           resultArea.style.display = 'block';
           copyBtn.style.display = 'inline-block';
-          // prepare download link
           const blob = new Blob([json], {type:'application/json'});
           downloadBtn.href = URL.createObjectURL(blob);
           downloadBtn.style.display = 'inline-block';
           setStatus('Parsing complete. Attempting to return data to Pebble companion...', 'ok');
 
-          // Try to return to Pebble companion using pebblejs://close#<encodedJSON>
           try {
             const encoded = encodeURIComponent(json);
-            // small safety: if encoded is extremely large, avoid immediate redirect and let user copy
             if (encoded.length > 200000) {
               setStatus('Parsed JSON is large. Use Copy JSON or Download JSON to transfer to the companion manually.', 'err');
               return;
             }
-            // Redirect to pebblejs close URL
             window.location = 'pebblejs://close#' + encoded;
-            // Some browsers block custom-scheme redirects; we still show the JSON and copy button
           } catch (e) {
             setStatus('Could not redirect to pebblejs://close. Use Copy JSON or Download JSON.', 'err');
           }
@@ -287,31 +289,27 @@
       });
     });
 
-    // Copy JSON button
     copyBtn.addEventListener('click', function(){
       if (!lastPayload) return;
-      navigator.clipboard && navigator.clipboard.writeText(lastPayload).then(function(){
-        alert('JSON copied to clipboard.');
-      }).catch(function(){
-        // fallback
-        const ta = document.createElement('textarea');
-        ta.value = lastPayload;
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); alert('JSON copied to clipboard.'); } catch(e){ alert('Copy failed. Please select and copy manually.'); }
-        document.body.removeChild(ta);
-      });
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(lastPayload).then(function(){ alert('JSON copied to clipboard.'); }).catch(function(){
+          fallbackCopy(lastPayload);
+        });
+      } else {
+        fallbackCopy(lastPayload);
+      }
     });
 
-    // Small helper: show instructions if opened directly (test mode)
-    if (location.search.indexOf('test=1') !== -1) {
-      setStatus('Test mode: no file required. This demo does not include real GTFS data.', 'ok');
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); alert('JSON copied to clipboard.'); } catch(e){ alert('Copy failed. Please select and copy manually.'); }
+      document.body.removeChild(ta);
     }
 
-    // Accessibility: clicking the label triggers file input
-    document.querySelector('.file-label').addEventListener('click', function(){
-      fileInput.click();
-    });
+    chooseLabel.addEventListener('click', function(){ fileInput.click(); });
 
   })();
   </script>
