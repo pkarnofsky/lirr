@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>LIRR GTFS Upload</title>
+</head>
+<body>
+<h2>Upload gtfslirr.zip</h2>
+<input type="file" id="file" accept=".zip">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+<script>
+document.getElementById("file").addEventListener("change", async function(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+
+  const zip = await JSZip.loadAsync(file);
+
+  // Read GTFS files
+  const stopsTxt = await zip.file("stops.txt").async("string");
+  const stopTimesTxt = await zip.file("stop_times.txt").async("string");
+  const tripsTxt = await zip.file("trips.txt").async("string");
+
+  // Parse CSV into arrays
+  function parseCSV(text) {
+    const lines = text.trim().split("\n");
+    const headers = lines[0].split(",");
+    return lines.slice(1).map(line => {
+      const cols = line.split(",");
+      const obj = {};
+      headers.forEach((h, i) => obj[h] = cols[i]);
+      return obj;
+    });
+  }
+
+  const stops = parseCSV(stopsTxt);
+  const stopTimes = parseCSV(stopTimesTxt);
+  const trips = parseCSV(tripsTxt);
+
+  // Build compact structures
+  const stopsOut = {};
+  stops.forEach(s => {
+    if (!stopsOut[s.stop_name]) stopsOut[s.stop_name] = [];
+    stopsOut[s.stop_name].push(s.stop_id);
+  });
+
+  const stopTimesOut = stopTimes.map(st => ({
+    trip: st.trip_id,
+    stop: st.stop_id,
+    dep: timeToEpoch(st.departure_time)
+  }));
+
+  const tripsOut = {};
+  trips.forEach(t => {
+    tripsOut[t.trip_id] = {
+      route: t.route_id,
+      dir: t.direction_id
+    };
+  });
+
+  function timeToEpoch(hms) {
+    const [h, m, s] = hms.split(":").map(Number);
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s);
+    return Math.floor(d.getTime() / 1000);
+  }
+
+  const payload = {
+    stops: stopsOut,
+    stop_times: stopTimesOut,
+    trips: tripsOut
+  };
+
+  // Return to Pebble
+  const json = encodeURIComponent(JSON.stringify(payload));
+  document.location = "pebblejs://close#" + json;
+});
+</script>
+</body>
+</html>
